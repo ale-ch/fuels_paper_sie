@@ -1,0 +1,15 @@
+1. Move all raw data csv files to directories (use utils/organize_files.py if necessary):
+- stations_data
+- price_data
+
+2. Use utils/rename_files.py to standardize file names.
+
+3. Run the scripts in the directory dataset_creation in order. 
+
+4. Run utils/qc_chunks.py to ensure the data has been split correctly.
+
+5. Run utils/reduce_data_size.py to remove column "address", if you need. 
+
+6. Run utils/csv_to_rds.R to compress the data even further. 
+
+7. Run group_data.R to create spatial and temporal aggregations of the data (municipal, weekly, monthly and quarterly)
