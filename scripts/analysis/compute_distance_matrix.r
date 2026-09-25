@@ -9,7 +9,7 @@ library(splm)
 file_path <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly/part_0.RDS"
 stations_list_file <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
 
-df <- readRDS(file_path)
+# df <- readRDS(file_path)
 stations_list <- read_delim(stations_list_file, delim = "|")
 
 stations_list <- stations_list %>% 
