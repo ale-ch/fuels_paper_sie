@@ -19,3 +19,4 @@ brent_df <- data.frame(
   # 2. Last Observation Carried Forward (imputes from previous day)
   mutate(brent_price = na.locf(brent_price, na.rm = FALSE))
 
+rm(DCOILBRENTEU)
