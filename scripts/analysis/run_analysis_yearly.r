@@ -29,7 +29,7 @@ run_yearly_models <- function(years, data_file, stations_list_file, k = 10) {
         spatial.error = FALSE, 
         method = "w2sls"
       )
-      
+
       models_list[[as.character(yr)]] <- model
       cat(sprintf("Successfully estimated model for %d\n", yr))
       
