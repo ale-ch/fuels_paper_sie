@@ -4,7 +4,11 @@
 
 2. Use utils/rename_files.py to standardize file names.
 
-3. Run the scripts in the directory dataset_creation in order. 
+3. Run the scripts in the directory dataset_creation in order:
+	- 0_process_stations_list.py
+	- 1_create_stations_list.py
+	- 2_process_prices_data.py
+	- 3_merge_batched_data.py 
 
 4. Run utils/qc_chunks.py to ensure the data has been split correctly.
 
