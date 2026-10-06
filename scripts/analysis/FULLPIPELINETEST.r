@@ -66,6 +66,16 @@ build_city_areas <- function(shp_path) {
     rename(city = COMUNE) %>% select(city, area_sq_km) %>% st_drop_geometry()
 }
 
+build_brand_categories <- function(mappings_dir) {
+  files_list <- list.files(mappings_dir, pattern = "RDS$", full.names = TRUE)
+  brand_map <- map_dfr(files_list, function(f) select(readRDS(f), brand)) %>%
+    count(brand, name = "n") %>% arrange(desc(n)) %>%
+    mutate(brand_group = if_else(cumsum(n / sum(n)) <= 0.9, "major", "minor")) %>%
+    select(brand, brand_group)
+  
+  brand_map
+}
+
 prepare_integrated_panel <- function(data_file, stations_list_file, pop_dir, shp_path, mappings_dir) {
   df <- readRDS(data_file)
   
@@ -92,11 +102,11 @@ prepare_integrated_panel <- function(data_file, stations_list_file, pop_dir, shp
     mutate(population_density_km2 = population / area_sq_km)
   
   # Categorize brands
-  files_list <- list.files(mappings_dir, pattern = "RDS$", full.names = TRUE)
-  brand_map <- map_dfr(files_list, function(f) select(readRDS(f), brand)) %>%
-    count(brand, name = "n") %>% arrange(desc(n)) %>%
-    mutate(brand_group = if_else(cumsum(n / sum(n)) <= 0.9, "major", "minor")) %>%
-    select(brand, brand_group)
+  if (file.exists("data/brand_categories.csv")) {
+    brand_map <- read_csv("data/brand_categories.csv")
+  } else {
+    brand_map <- build_brand_categories(mappings_dir)
+  }
   
   df <- df %>%
     left_join(brand_map, by = "brand") %>%
@@ -237,55 +247,8 @@ analyze_comparative_diagnostics <- function(rolling_results) {
 
 
 # ------------------------------------------------------------------------------
-# PIPELINE EXECUTION SCRIPT
+# PIPELINE EXECUTION FUNCTIONS
 # ------------------------------------------------------------------------------
-
-# 1. Define Input Paths
-df_file      <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly/part_0.RDS"
-rdata_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
-stations_csv <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
-pop_dir      <- "/Volumes/T7 Shield/FRES/fuels_data/population"
-shp_path     <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
-
-# 2. Execution Parameters
-window_weeks <- 52
-radius_m     <- 30000
-
-# 3. Run Pipeline
-cat("Starting Data Preparation...\n")
-base_data <- prepare_integrated_panel(
-  data_file          = df_file,
-  stations_list_file = stations_csv,
-  pop_dir            = pop_dir,
-  shp_path           = shp_path,
-  mappings_dir       = rdata_dir
-)
-cat("Data Preparation Complete.\n\n")
-
-cat(sprintf("Starting Rolling Panel Models (%d-week windows)...\n", window_weeks))
-rolling_results <- run_rolling_panel_models(
-  base_data   = base_data,
-  window_size = window_weeks,
-  radius_m    = radius_m
-)
-cat("Model Execution Complete.\n\n")
-
-cat("Starting Diagnostics and Analysis...\n")
-diagnostics <- analyze_comparative_diagnostics(rolling_results)
-cat("Analysis Complete.\n\n")
-
-# 4. Save Outputs
-output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
-if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
-
-saveRDS(rolling_results, file.path(output_dir, "rolling_models_output.RDS"))
-write_csv(diagnostics$stats_data, file.path(output_dir, "comparative_model_stats.csv"))
-
-ggsave(file.path(output_dir, "spatial_lag_comparison.png"), plot = diagnostics$plots[[1]], width = 10, height = 6)
-ggsave(file.path(output_dir, "brent_lag_comparison.png"), plot = diagnostics$plots[[2]], width = 10, height = 6)
-
-cat("Outputs saved to:", output_dir, "\n")
-
 
 generate_summary_table <- function(stats_data) {
   require(dplyr)
@@ -303,10 +266,6 @@ generate_summary_table <- function(stats_data) {
   
   return(summary_table)
 }
-
-# Execution addition
-summary_stats <- generate_summary_table(diagnostics$stats_data)
-write_csv(summary_stats, file.path(output_dir, paste0("summary_statistics", ".csv")))
 
 plot_summary_statistics <- function(summary_table) {
   require(ggplot2)
@@ -350,4 +309,80 @@ plot_summary_statistics <- function(summary_table) {
   return(p)
 }
 
-plot_summary_statistics(summary_stats)
+run_spatial_pipeline <- function(df_file, stations_csv, pop_dir, shp_path, rdata_dir, output_dir, window_weeks = 52, radius_m = 30000) {
+  
+  cat("Starting Data Preparation...\n")
+  base_data <- prepare_integrated_panel(
+    data_file          = df_file,
+    stations_list_file = stations_csv,
+    pop_dir            = pop_dir,
+    shp_path           = shp_path,
+    mappings_dir       = rdata_dir
+  )
+  cat("Data Preparation Complete.\n\n")
+  
+  cat(sprintf("Starting Rolling Panel Models (%d-week windows)...\n", window_weeks))
+  rolling_results <- run_rolling_panel_models(
+    base_data   = base_data,
+    window_size = window_weeks,
+    radius_m    = radius_m
+  )
+  cat("Model Execution Complete.\n\n")
+  
+  cat("Starting Diagnostics and Analysis...\n")
+  diagnostics <- analyze_comparative_diagnostics(rolling_results)
+  cat("Analysis Complete.\n\n")
+  
+  # Save Outputs
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  
+  saveRDS(rolling_results, file.path(output_dir, "rolling_models_output.RDS"))
+  write_csv(diagnostics$stats_data, file.path(output_dir, "comparative_model_stats.csv"))
+  
+  ggsave(file.path(output_dir, "spatial_lag_comparison.png"), plot = diagnostics$plots[[1]], width = 10, height = 6)
+  ggsave(file.path(output_dir, "brent_lag_comparison.png"), plot = diagnostics$plots[[2]], width = 10, height = 6)
+  
+  # Summary statistics and plots
+  summary_stats <- generate_summary_table(diagnostics$stats_data)
+  write_csv(summary_stats, file.path(output_dir, "summary_statistics.csv"))
+  
+  p_summary <- plot_summary_statistics(summary_stats)
+  ggsave(file.path(output_dir, "model_summaries.png"), plot = p_summary, width = 12, height = 8)
+  
+  cat("Outputs saved to:", output_dir, "\n")
+  
+  # Return items to the global environment
+  return(list(
+    rolling_results = rolling_results,
+    diagnostics = diagnostics,
+    summary_stats = summary_stats
+  ))
+}
+
+# ------------------------------------------------------------------------------
+# PIPELINE EXECUTION SCRIPT
+# ------------------------------------------------------------------------------
+
+# Define Input and Output Paths
+df_file      <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly/part_0.RDS"
+rdata_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
+stations_csv <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
+pop_dir      <- "/Volumes/T7 Shield/FRES/fuels_data/population"
+shp_path     <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
+output_dir   <- "/Volumes/T7 Shield/FRES/fuels_data/results"
+
+# Define Execution Parameters
+window_weeks <- 52
+radius_m     <- 30000
+
+# Execute Pipeline
+pipeline_results <- run_spatial_pipeline(
+  df_file      = df_file,
+  stations_csv = stations_csv,
+  pop_dir      = pop_dir,
+  shp_path     = shp_path,
+  rdata_dir    = rdata_dir,
+  output_dir   = output_dir,
+  window_weeks = window_weeks,
+  radius_m     = radius_m
+)
