@@ -12,58 +12,80 @@ library(plm)
 library(splm)
 
 build_population_data <- function(base_dir) {
-  singola_area_dir <- file.path(base_dir, "PopolazioneEta-SingolaArea-Comuni")
   
-  posas_files <- list.files(base_dir, pattern = "POSAS", full.names = TRUE)
-  population_posas <- map_dfr(posas_files, function(file_path) {
-    extracted_year <- as.numeric(str_extract(basename(file_path), "\\d{4}"))
-    read_delim(file_path, delim = ";", skip = 1, show_col_types = FALSE) %>% 
-      rename(id_city = `Codice comune`, city = Comune, population = Totale, age = Età) %>% 
-      filter(age == 999, extracted_year > 2019) %>% 
-      mutate(year = extracted_year) %>% 
-      select(id_city, city, year, population)
-  })
-  
-  process_singola_area <- function(file_path) {
-    lines <- readLines(file_path, warn = FALSE)
-    lines <- lines[lines != ""]
-    meta_match <- str_match(str_remove_all(lines[1], '"'), "Comune:\\s*(\\d+)\\s*-\\s*(.+)$")
+  if(!file.exists(file.path(base_dir, "city_population.csv"))) {
+    singola_area_dir <- file.path(base_dir, "PopolazioneEta-SingolaArea-Comuni")
     
-    if (is.na(meta_match[1])) return(NULL)
+    posas_files <- list.files(base_dir, pattern = "POSAS", full.names = TRUE)
+    population_posas <- map_dfr(posas_files, function(file_path) {
+      extracted_year <- as.numeric(str_extract(basename(file_path), "\\d{4}"))
+      read_delim(file_path, delim = ";", skip = 1, show_col_types = FALSE) %>% 
+        rename(id_city = `Codice comune`, city = Comune, population = Totale, age = Età) %>% 
+        filter(age == 999, extracted_year > 2019) %>% 
+        mutate(year = extracted_year) %>% 
+        select(id_city, city, year, population)
+    })
     
-    header_idx <- grep("Età/Anno", lines)[1]
-    totale_idx <- grep("^\"?Totale;", lines)[1]
-    if (is.na(header_idx) || is.na(totale_idx)) return(NULL)
+    process_singola_area <- function(file_path) {
+      lines <- readLines(file_path, warn = FALSE)
+      lines <- lines[lines != ""]
+      meta_match <- str_match(str_remove_all(lines[1], '"'), "Comune:\\s*(\\d+)\\s*-\\s*(.+)$")
+      
+      if (is.na(meta_match[1])) return(NULL)
+      
+      header_idx <- grep("Età/Anno", lines)[1]
+      totale_idx <- grep("^\"?Totale;", lines)[1]
+      if (is.na(header_idx) || is.na(totale_idx)) return(NULL)
+      
+      read.csv(text = paste(lines[header_idx], lines[totale_idx], sep = "\n"), 
+               sep = ";", check.names = FALSE, stringsAsFactors = FALSE) %>%
+        pivot_longer(cols = -1, names_to = "year", values_to = "population") %>%
+        mutate(id_city = as.numeric(meta_match[2]), city = meta_match[3], 
+               year = as.numeric(year), population = as.numeric(population)) %>%
+        select(id_city, city, year, population)
+    }
     
-    read.csv(text = paste(lines[header_idx], lines[totale_idx], sep = "\n"), 
-             sep = ";", check.names = FALSE, stringsAsFactors = FALSE) %>%
-      pivot_longer(cols = -1, names_to = "year", values_to = "population") %>%
-      mutate(id_city = as.numeric(meta_match[2]), city = meta_match[3], 
-             year = as.numeric(year), population = as.numeric(population)) %>%
-      select(id_city, city, year, population)
+    singola_area_files <- list.files(singola_area_dir, pattern = "\\.csv$", full.names = TRUE)
+    
+    pop_final <- bind_rows(
+      mutate(population_posas, id_city = as.numeric(id_city)), 
+      map_dfr(singola_area_files, process_singola_area)
+    ) %>% filter(year >= 2016) %>% arrange(id_city, year)
+    
+    pop_final$city <- str_replace_all(toupper(pop_final$city), 
+                                      c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
+    
+    write_csv(pop_final, file.path(base_dir, "city_population.csv"))
+  } else {
+    pop_final <- read_csv(file.path(base_dir, "city_population.csv")) 
   }
   
-  singola_area_files <- list.files(singola_area_dir, pattern = "\\.csv$", full.names = TRUE)
-  
-  pop_final <- bind_rows(
-    mutate(population_posas, id_city = as.numeric(id_city)), 
-    map_dfr(singola_area_files, process_singola_area)
-  ) %>% filter(year >= 2016) %>% arrange(id_city, year)
-  
-  pop_final$city <- str_replace_all(toupper(pop_final$city), 
-                                    c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
   return(pop_final)
 }
 
-build_city_areas <- function(shp_path) {
+build_city_areas <- function(shp_path, nuts_path) {
+  nuts_data <- fromJSON(nuts_path)
+  nuts_data <- as.data.frame(nuts_data$resultset)
+  nuts_data <- nuts_data %>% 
+    select(PRO_COM, contains("DEN")) %>% 
+    rename(
+      nuts1 = DEN_RIP,
+      nuts2 = DEN_REG,
+      nuts3 = DEN_UTS
+    )
+  
   shp_data <- st_read(shp_path, quiet = TRUE)
+  shp_data <- shp_data %>% 
+    left_join(nuts_data)
   shp_data$COMUNE <- str_replace_all(toupper(shp_data$COMUNE), 
                                      c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
   
   shp_data %>%
     mutate(COMUNE = ifelse(!is.na(COMUNE_A) & COMUNE_A != "", sub("/.*", "", COMUNE), COMUNE),
            area_sq_km = Shape_Area / 1000000) %>%
-    rename(city = COMUNE) %>% select(city, area_sq_km) %>% st_drop_geometry()
+    rename(city = COMUNE) %>% 
+    select(city, area_sq_km, contains("nuts")) %>% 
+    st_drop_geometry()
 }
 
 build_brand_categories <- function(mappings_dir) {
@@ -86,9 +108,22 @@ prepare_integrated_panel <- function(data_file, stations_list_file, pop_dir, shp
     st_transform(32632) %>% arrange(id_pump)
   
   getSymbols("DCOILBRENTEU", src = "FRED", from = "2016-01-01", to = "2026-12-31", auto.assign = TRUE)
-  brent_df <- data.frame(date = ymd(index(DCOILBRENTEU)), brent_price = as.numeric(DCOILBRENTEU$DCOILBRENTEU)) %>%
+  brent_df <- data.frame(
+      date = ymd(index(DCOILBRENTEU)), 
+      brent_price = as.numeric(DCOILBRENTEU$DCOILBRENTEU)
+    ) %>%
     complete(date = seq.Date(min(date), max(date), by = "day")) %>%
-    mutate(brent_price = na.locf(brent_price, na.rm = FALSE))
+    mutate(
+      brent_price = na.locf(brent_price, na.rm = FALSE),
+      # Calculate the period-to-period change
+      brent_diff = brent_price - lag(brent_price),
+      
+      # Isolate positive changes (increases)
+      brent_diff_pos = ifelse(brent_diff > 0, brent_diff, 0),
+      
+      # Isolate negative changes (decreases)
+      brent_diff_neg = ifelse(brent_diff < 0, brent_diff, 0)
+    )
   
   df <- df %>%
     left_join(brent_df %>% group_by(year = year(date), week = week(date)) %>% 
@@ -97,9 +132,13 @@ prepare_integrated_panel <- function(data_file, stations_list_file, pop_dir, shp
            city = str_replace_all(toupper(city), c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'")))
   
   df <- df %>%
-    left_join(build_population_data(pop_dir) %>% select(city, year, population), by = c("city", "year")) %>%
-    left_join(build_city_areas(shp_path), by = "city") %>%
+    left_join(
+      build_population_data(pop_dir) %>% 
+        select(city, year, population), by = c("city", "year")
+      ) %>%
+    left_join(build_city_areas(shp_path, nuts_path), by = "city") %>%
     mutate(population_density_km2 = population / area_sq_km)
+  
   
   # Categorize brands
   if (file.exists("data/brand_categories.csv")) {
@@ -121,7 +160,10 @@ prepare_integrated_panel <- function(data_file, stations_list_file, pop_dir, shp
 # 2. MODEL SPECIFICATIONS
 # ------------------------------------------------------------------------------
 base_formula <- mean_price_gasoline_self ~ lag(mean_price_gasoline_self, 1) + 
-  lag(brent_price_mean, 1) + population_density_km2 + brand_group + station_type
+  # lag(brent_price_mean, 1) + 
+  lag(brent_diff_pos, 1) + 
+  lag(brent_diff_neg, 1) + 
+  population_density_km2 + brand_group + station_type
 
 models_spec <- list(
   SLX   = list(lag = FALSE, spatial.error = FALSE, Durbin = TRUE),
@@ -219,6 +261,9 @@ analyze_comparative_diagnostics <- function(rolling_results) {
     term == "lambda" ~ "Spatial Lag (rho)",
     term == "lag(mean_price_gasoline_self, 1)" ~ "Time Lag (Gasoline)",
     term == "lag(brent_price_mean, 1)" ~ "Time Lag (Brent)",
+    term == lag(brent_diff_pos, 1) ~ "Time Lag (Brent Δ+)",
+    term == lag(brent_diff_neg, 1) ~ "Time Lag (Brent Δ-)",
+    # lag(brent_diff_neg, 1) +
     TRUE ~ term
   ))
   
@@ -233,7 +278,7 @@ analyze_comparative_diagnostics <- function(rolling_results) {
   }
   
   p1 <- plot_comparative("Spatial Lag (rho)", "Comparison of Spatial Lag Estimates Across Models")
-  p2 <- plot_comparative("Time Lag (Brent)", "Comparison of Brent Price Transmission Across Models")
+  p2 <- plot_comparative("Time Lag (Brent)", "Comparison of Brent Price Change Transmission Across Models")
   
   print(p1)
   print(p2)
@@ -369,6 +414,7 @@ rdata_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
 stations_csv <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
 pop_dir      <- "/Volumes/T7 Shield/FRES/fuels_data/population"
 shp_path     <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
+nuts_path    <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
 output_dir   <- "/Volumes/T7 Shield/FRES/fuels_data/results"
 
 # Define Execution Parameters
