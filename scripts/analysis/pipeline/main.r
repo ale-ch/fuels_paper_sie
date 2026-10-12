@@ -4,9 +4,9 @@
 base_path <- "/Volumes/T7 Shield/FRES/repos/fuels_paper_sie"
 setwd(base_path)
 
-source("scripts/analysis/pipeline/data_preparation_NEW.r")
-source("scripts/analysis/pipeline/estimation_NEW.r")
-source("scripts/analysis/pipeline/analyze_results_NEW.r")
+source("scripts/analysis/pipeline/data_preparation.r")
+source("scripts/analysis/pipeline/estimation.r")
+source("scripts/analysis/pipeline/analyze_results.r")
 
 library(tidyverse)
 library(sf)
@@ -143,9 +143,9 @@ test_mode          <- FALSE
 random_seed        <- 42
 
 # --- SCOPE AND GRANULARITY SELECTION ---
-scope_level            <- "nuts1" 
-scope_name             <- "Nord-ovest" 
-estimation_granularity <- "nuts2"
+scope_level            <- "nuts2" 
+scope_name             <- "Lombardia" 
+estimation_granularity <- "nuts3"
 # ---------------------------------------
 
 # --- DYNAMIC OUTPUT DIRECTORY CREATION ---
