@@ -6,9 +6,6 @@ library(sf)
 library(ggplot2)
 library(jsonlite)
 
-# --- REFACTOR NOTE: Merged the two redundant functions into a single robust standalone function. ---
-# --- REFACTOR NOTE: Replaced hardcoded 'nuts1' and 'nuts0' with a generic 'region' column. ---
-
 analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
   file_paths <- list.files(parts_dir, pattern = "\\.RDS$", full.names = TRUE)
   if(length(file_paths) == 0) stop("No RDS files found in the specified directory.")
@@ -24,7 +21,7 @@ analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
       c_df$model <- m_name
       c_df$window <- mod_data$window
       c_df$end_week <- mod_data$end_week
-      c_df$region <- mod_data$region # Extracted dynamically from the saved model object
+      c_df$region <- mod_data$region 
       c_df$date <- as.Date(paste0(mod_data$end_week, "-1"), format = "%Y-%W-%u")
       return(c_df)
     })
@@ -48,7 +45,6 @@ analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
   return(coef_df)
 }
 
-# --- REFACTOR NOTE: Now facets by the generic 'region' column. ---
 plot_comparative_timeseries <- function(coef_df, target_term, title, is_split = TRUE) {
   plot_data <- coef_df %>% filter(term == target_term)
   if (nrow(plot_data) == 0) return(ggplot() + theme_void() + labs(title = paste("Missing data for", target_term)))
@@ -67,7 +63,6 @@ plot_comparative_timeseries <- function(coef_df, target_term, title, is_split = 
 # 5. SUMMARY AND MAP GENERATION FUNCTIONS
 # ------------------------------------------------------------------------------
 
-# --- REFACTOR NOTE: Grouping is now done by 'region' instead of 'nuts1'. ---
 generate_summary_table <- function(stats_data) {
   summary_table <- stats_data %>%
     group_by(region, term, model) %>%
@@ -83,8 +78,6 @@ generate_summary_table <- function(stats_data) {
   return(summary_table)
 }
 
-# --- REFACTOR NOTE: Added 'target_nuts_level' parameter to dynamically join and group 
-# --- geometries by nuts1, nuts2, or nuts3 depending on the user's pipeline choice. ---
 plot_coefficient_maps <- function(summary_table, shp_path, nuts_path, 
                                   target_nuts_level = "nuts1", target_model = "SDM", 
                                   target_term = "Spatial Lag (rho)") {
@@ -98,13 +91,12 @@ plot_coefficient_maps <- function(summary_table, shp_path, nuts_path,
     left_join(nuts_data, by = c("PRO_COM" = "PRO_COM"))
   
   # 2. Aggregate municipal geometries dynamically based on target_nuts_level
-  # Convert the string to a symbol so dplyr can group by it
   level_sym <- sym(target_nuts_level)
   
   region_polygons <- shp_data %>%
     group_by(!!level_sym) %>%
     summarise(geometry = st_union(geometry), .groups = "drop") %>%
-    rename(region = !!level_sym) # Standardize column name to match summary_table
+    rename(region = !!level_sym) 
   
   # 3. Filter statistical data
   stats_subset <- summary_table %>% filter(model == target_model, term == target_term)
@@ -135,7 +127,6 @@ plot_coefficient_maps <- function(summary_table, shp_path, nuts_path,
 # 6. PIPELINE WRAPPER AND SUMMARY PLOTTER
 # ------------------------------------------------------------------------------
 
-# --- REFACTOR NOTE: Updated to check for 'region' instead of 'nuts1' for dynamic faceting. ---
 plot_summary_statistics <- function(summary_table, terms_to_plot = NULL) {
   plot_data <- summary_table %>% filter(term != "(Intercept)")
   
@@ -171,4 +162,3 @@ plot_summary_statistics <- function(summary_table, terms_to_plot = NULL) {
   
   return(p)
 }
-

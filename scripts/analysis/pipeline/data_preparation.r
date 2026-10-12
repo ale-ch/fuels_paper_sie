@@ -114,7 +114,7 @@ stratified_spatial_sample <- function(stations_sf, min_stations_per_region = 30,
 
 prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path, 
                                      min_stations = 30, sample_fraction = 0.10, test = FALSE, 
-                                     target_nuts_level = "all", target_region_name = NULL, seed = 42) {
+                                     scope_level = "all", scope_name = NULL, seed = 42) {
   
   set.seed(seed)
   
@@ -137,19 +137,19 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
     filter(!is.na(nuts3))
   
   # 2. Regional Filtering Block
-  if (target_nuts_level != "all") {
-    cat(sprintf("Filtering stations strictly for %s: %s...\n", target_nuts_level, target_region_name))
-    if (target_nuts_level == "nuts1") {
-      stations_sf <- stations_sf %>% filter(nuts1 == target_region_name)
-    } else if (target_nuts_level == "nuts2") {
-      stations_sf <- stations_sf %>% filter(nuts2 == target_region_name)
-    } else if (target_nuts_level == "nuts3") {
-      stations_sf <- stations_sf %>% filter(nuts3 == target_region_name)
+  if (scope_level != "all") {
+    cat(sprintf("Filtering stations strictly for scope %s: %s...\n", scope_level, scope_name))
+    if (scope_level == "nuts1") {
+      stations_sf <- stations_sf %>% filter(nuts1 == scope_name)
+    } else if (scope_level == "nuts2") {
+      stations_sf <- stations_sf %>% filter(nuts2 == scope_name)
+    } else if (scope_level == "nuts3") {
+      stations_sf <- stations_sf %>% filter(nuts3 == scope_name)
     }
     
     if (nrow(stations_sf) == 0) {
       stop(sprintf("Error: No stations found for %s = '%s'. Check your spelling in the main script.", 
-                   target_nuts_level, target_region_name))
+                   scope_level, scope_name))
     }
   }
   
@@ -158,10 +158,11 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
   stations_sf <- stratified_spatial_sample(
     stations_sf, 
     min_stations_per_region = min_stations, 
-    sample_fraction = sample_fraction
+    sample_fraction = sample_fraction,
+    seed = seed
   )
   sampled_ids <- stations_sf$id_pump
-  cat(sprintf("Sampled %d stations across %d regions.\n", length(sampled_ids), length(unique(stations_sf$nuts3))))
+  cat(sprintf("Sampled %d stations across %d NUTS3 regions.\n", length(sampled_ids), length(unique(stations_sf$nuts3))))
   
   # 4. Iteratively load panel data
   rds_files <- list.files(rdata_dir, pattern = "\\.RDS$", full.names = TRUE)
@@ -240,9 +241,7 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
            station_type = factor(station_type))
   
   if (isTRUE(test)) {
-    # If in test mode and 'all' was selected, enforce a small default region to prevent crash.
-    # Otherwise, respect the already filtered dataset.
-    if (target_nuts_level == "all") {
+    if (scope_level == "all") {
       df <- df %>% filter(nuts1 == "Centro")
     }
   }

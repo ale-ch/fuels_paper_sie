@@ -4,30 +4,33 @@
 base_path <- "/Volumes/T7 Shield/FRES/repos/fuels_paper_sie"
 setwd(base_path)
 
-source("scripts/analysis/pipeline/data_preparation.r")
-source("scripts/analysis/pipeline/estimation.r")
-source("scripts/analysis/pipeline/analyze_results.r")
+source("scripts/analysis/pipeline/data_preparation_NEW.r")
+source("scripts/analysis/pipeline/estimation_NEW.r")
+source("scripts/analysis/pipeline/analyze_results_NEW.r")
 
 library(tidyverse)
 library(sf)
 
 run_spatial_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nuts_path, mappings_dir, output_dir, 
                                  window_weeks = 52, radius_m = 30000, 
-                                 target_nuts_level = "all", target_region_name = NULL,
+                                 scope_level = "all", scope_name = NULL, estimation_granularity = "nuts1",
                                  min_stations = 30, sample_fraction = 0.10, test = FALSE, seed = 42) {
   
   set.seed(seed)
   
   # --- 1. VALIDATION BLOCK ---
   valid_levels <- c("all", "nuts1", "nuts2", "nuts3")
-  if (!target_nuts_level %in% valid_levels) {
-    stop("Error: target_nuts_level must be 'all', 'nuts1', 'nuts2', or 'nuts3'.")
+  if (!scope_level %in% valid_levels) {
+    stop("Error: scope_level must be 'all', 'nuts1', 'nuts2', or 'nuts3'.")
   }
-  if (target_nuts_level != "all" && is.null(target_region_name)) {
-    stop(sprintf("Error: You selected level '%s' but did not provide a target_region_name.", target_nuts_level))
+  if (scope_level != "all" && is.null(scope_name)) {
+    stop(sprintf("Error: You selected scope level '%s' but did not provide a scope_name.", scope_level))
   }
-  if (!is.null(target_region_name) && length(target_region_name) > 1) {
-    stop("Error: Please select strictly ONE region name to avoid memory bugs and overlapping runs.")
+  if (!is.null(scope_name) && length(scope_name) > 1) {
+    stop("Error: Please select strictly ONE scope name to avoid memory bugs and overlapping runs.")
+  }
+  if (!estimation_granularity %in% c("nuts1", "nuts2", "nuts3")) {
+    stop("Error: estimation_granularity must be 'nuts1', 'nuts2', or 'nuts3'.")
   }
   
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -44,8 +47,8 @@ run_spatial_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nut
     min_stations       = min_stations,
     sample_fraction    = sample_fraction,
     test               = test,
-    target_nuts_level  = target_nuts_level,
-    target_region_name = target_region_name,
+    scope_level        = scope_level,
+    scope_name         = scope_name,
     seed               = seed
   )
   
@@ -59,12 +62,12 @@ run_spatial_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nut
   # --- 3. ROLLING WINDOW ESTIMATION ---
   cat("\n=== PHASE 2: Rolling Panel Models ===\n")
   rolling_output <- run_rolling_panel_models(
-    base_data          = base_data,
-    output_dir         = output_dir,
-    window_size        = window_weeks,
-    radius_m           = radius_m,
-    target_nuts_level  = target_nuts_level,
-    target_region_name = target_region_name
+    base_data              = base_data,
+    output_dir             = output_dir,
+    window_size            = window_weeks,
+    radius_m               = radius_m,
+    estimation_granularity = estimation_granularity,
+    seed                   = seed
   )
   saveRDS(rolling_output, file.path(output_dir, "rolling_models_metadata.RDS"))
   
@@ -94,22 +97,20 @@ run_spatial_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nut
   p_brent_pos <- plot_comparative_timeseries(stats_data, "Time Lag (Brent Δ+)", "Positive Brent Price Change", is_split = TRUE)
   ggsave(file.path(output_dir, "brent_pos_timeseries.png"), plot = p_brent_pos, width = 12, height = 8)
   
-  # C. Geographic Mapping (Only if a specific NUTS level is targeted)
-  if (target_nuts_level %in% c("nuts1", "nuts2", "nuts3")) {
-    cat("Generating Geographic Maps for", toupper(target_nuts_level), "...\n")
-    
-    map_rho <- plot_coefficient_maps(summary_stats, shp_path, nuts_path, 
-                                     target_nuts_level = target_nuts_level, 
-                                     target_model = "SDM", target_term = "Spatial Lag (rho)")
-    ggsave(file.path(output_dir, sprintf("map_spatial_lag_SDM_%s.png", target_nuts_level)), 
-           plot = map_rho$plot, width = 10, height = 8)
-    
-    map_brent_pos <- plot_coefficient_maps(summary_stats, shp_path, nuts_path, 
-                                           target_nuts_level = target_nuts_level, 
-                                           target_model = "SDM", target_term = "Time Lag (Brent Δ+)")
-    ggsave(file.path(output_dir, sprintf("map_brent_pos_SDM_%s.png", target_nuts_level)), 
-           plot = map_brent_pos$plot, width = 10, height = 8)
-  }
+  # C. Geographic Mapping
+  cat("Generating Geographic Maps for", toupper(estimation_granularity), "...\n")
+  
+  map_rho <- plot_coefficient_maps(summary_stats, shp_path, nuts_path, 
+                                   target_nuts_level = estimation_granularity, 
+                                   target_model = "SDM", target_term = "Spatial Lag (rho)")
+  ggsave(file.path(output_dir, sprintf("map_spatial_lag_SDM_%s.png", estimation_granularity)), 
+         plot = map_rho$plot, width = 10, height = 8)
+  
+  map_brent_pos <- plot_coefficient_maps(summary_stats, shp_path, nuts_path, 
+                                         target_nuts_level = estimation_granularity, 
+                                         target_model = "SDM", target_term = "Time Lag (Brent Δ+)")
+  ggsave(file.path(output_dir, sprintf("map_brent_pos_SDM_%s.png", estimation_granularity)), 
+         plot = map_brent_pos$plot, width = 10, height = 8)
   
   cat("\nPipeline Execution Complete! Outputs saved to:", output_dir, "\n")
   
@@ -119,9 +120,6 @@ run_spatial_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nut
     summary_stats = summary_stats
   ))
 }
-
-
-
 
 # ------------------------------------------------------------------------------
 # 7. EXECUTION BLOCK (WITH DYNAMIC DIRECTORY & CONFIG LOGGING)
@@ -144,14 +142,15 @@ sample_fraction    <- 0.05
 test_mode          <- FALSE
 random_seed        <- 42
 
-# --- TARGET REGION SELECTION ---
-target_nuts_level  <- "nuts2" 
-target_region_name <- "Lombardia" 
-# -------------------------------
+# --- SCOPE AND GRANULARITY SELECTION ---
+scope_level            <- "nuts1" 
+scope_name             <- "Nord-ovest" 
+estimation_granularity <- "nuts2"
+# ---------------------------------------
 
 # --- DYNAMIC OUTPUT DIRECTORY CREATION ---
 timestamp_str <- format(Sys.time(), "%Y%m%d%H%M")
-region_prefix <- ifelse(target_nuts_level == "all", "All_Regions", target_region_name)
+region_prefix <- ifelse(scope_level == "all", "All_Regions", scope_name)
 run_output_dir <- file.path(base_output_dir, paste0(region_prefix, "_", timestamp_str))
 
 if (!dir.exists(run_output_dir)) dir.create(run_output_dir, recursive = TRUE)
@@ -160,24 +159,25 @@ cat(sprintf("Created specific output directory:\n%s\n", run_output_dir))
 # --- SAVE RUN CONFIGURATION LOG ---
 config_log_path <- file.path(run_output_dir, "run_config.log")
 config_details <- c(
-  sprintf("Random Seed:        %d", random_seed),
+  sprintf("Random Seed:            %d", random_seed),
   "=== SPATIAL PIPELINE RUN CONFIGURATION ===",
-  sprintf("Timestamp:          %s", timestamp_str),
-  sprintf("Target NUTS Level:  %s", target_nuts_level),
-  sprintf("Target Region Name: %s", ifelse(is.null(target_region_name), "None", target_region_name)),
-  sprintf("Window Weeks:       %d", window_weeks),
-  sprintf("Radius (m):         %d", radius_m),
-  sprintf("Min Stations:       %d", min_stations),
-  sprintf("Sample Fraction:    %.2f", sample_fraction),
-  sprintf("Test Mode:          %s", as.character(test_mode)),
+  sprintf("Timestamp:              %s", timestamp_str),
+  sprintf("Scope Level:            %s", scope_level),
+  sprintf("Scope Name:             %s", ifelse(is.null(scope_name), "None", scope_name)),
+  sprintf("Estimation Granularity: %s", estimation_granularity),
+  sprintf("Window Weeks:           %d", window_weeks),
+  sprintf("Radius (m):             %d", radius_m),
+  sprintf("Min Stations:           %d", min_stations),
+  sprintf("Sample Fraction:        %.2f", sample_fraction),
+  sprintf("Test Mode:              %s", as.character(test_mode)),
   "",
   "=== DIRECTORIES ===",
-  sprintf("Output Directory:   %s", run_output_dir),
-  sprintf("RData Directory:    %s", rdata_dir),
-  sprintf("Stations Data:      %s", stations_csv),
-  sprintf("Population Data:    %s", pop_dir),
-  sprintf("Shapefile Path:     %s", shp_path),
-  sprintf("NUTS Mappings:      %s", nuts_path)
+  sprintf("Output Directory:       %s", run_output_dir),
+  sprintf("RData Directory:        %s", rdata_dir),
+  sprintf("Stations Data:          %s", stations_csv),
+  sprintf("Population Data:        %s", pop_dir),
+  sprintf("Shapefile Path:         %s", shp_path),
+  sprintf("NUTS Mappings:          %s", nuts_path)
 )
 writeLines(config_details, config_log_path)
 cat("Run configuration saved to log.\n")
@@ -185,19 +185,20 @@ cat("Run configuration saved to log.\n")
 
 # Execute Pipeline
 pipeline_results <- run_spatial_pipeline(
-  rdata_dir          = rdata_dir,
-  stations_csv       = stations_csv,
-  pop_dir            = pop_dir,
-  shp_path           = shp_path,
-  nuts_path          = nuts_path,
-  mappings_dir       = mappings_dir,
-  output_dir         = run_output_dir,
-  window_weeks       = window_weeks,
-  radius_m           = radius_m,
-  target_nuts_level  = target_nuts_level,
-  target_region_name = target_region_name,
-  min_stations       = min_stations,
-  sample_fraction    = sample_fraction,
-  test               = test_mode,
-  seed               = random_seed
+  rdata_dir              = rdata_dir,
+  stations_csv           = stations_csv,
+  pop_dir                = pop_dir,
+  shp_path               = shp_path,
+  nuts_path              = nuts_path,
+  mappings_dir           = mappings_dir,
+  output_dir             = run_output_dir,
+  window_weeks           = window_weeks,
+  radius_m               = radius_m,
+  scope_level            = scope_level,
+  scope_name             = scope_name,
+  estimation_granularity = estimation_granularity,
+  min_stations           = min_stations,
+  sample_fraction        = sample_fraction,
+  test                   = test_mode,
+  seed                   = random_seed
 )
