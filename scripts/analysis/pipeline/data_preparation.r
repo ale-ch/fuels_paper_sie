@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------
-# 1. DATA PREPARATION (UPDATED WITH STRATIFIED SAMPLING)
+# 1. DATA PREPARATION (UPDATED WITH STRATIFIED SAMPLING & REGIONAL FILTERING)
 # ------------------------------------------------------------------------------
 library(tidyverse)
 library(sf)
@@ -12,11 +12,7 @@ library(plm)
 library(splm)
 library(jsonlite)
 
-# (Keep build_population_data, build_city_areas, and build_brand_categories as they are)
-
-
 build_population_data <- function(base_dir) {
-  
   if(!file.exists(file.path(base_dir, "city_population.csv"))) {
     singola_area_dir <- file.path(base_dir, "PopolazioneEta-SingolaArea-Comuni")
     
@@ -79,8 +75,7 @@ build_city_areas <- function(shp_path, nuts_path) {
     )
   
   shp_data <- st_read(shp_path, quiet = TRUE)
-  shp_data <- shp_data %>% 
-    left_join(nuts_data)
+  shp_data <- shp_data %>% left_join(nuts_data, by = "PRO_COM")
   shp_data$COMUNE <- str_replace_all(toupper(shp_data$COMUNE), 
                                      c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
   
@@ -102,7 +97,6 @@ build_brand_categories <- function(mappings_dir) {
   brand_map
 }
 
-
 stratified_spatial_sample <- function(stations_sf, min_stations_per_region = 30, sample_fraction = 0.10, seed = 42) {
   set.seed(seed)
   sampled_stations <- stations_sf %>%
@@ -118,14 +112,18 @@ stratified_spatial_sample <- function(stations_sf, min_stations_per_region = 30,
   return(sampled_stations)
 }
 
-prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path, min_stations = 30, sample_fraction = 0.10, test = FALSE) {
+prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path, 
+                                     min_stations = 30, sample_fraction = 0.10, test = FALSE, 
+                                     target_nuts_level = "all", target_region_name = NULL, seed = 42) {
   
-  # 1. Load and spatially join stations to NUTS3 regions for sampling
+  set.seed(seed)
+  
+  # 1. Load and spatially join stations to NUTS regions for sampling
   cat("Loading geographic boundaries for spatial sampling...\n")
   nuts_data <- as.data.frame(fromJSON(nuts_path)$resultset)
   shp_data <- st_read(shp_path, quiet = TRUE) %>%
     left_join(nuts_data, by = c("PRO_COM" = "PRO_COM")) %>%
-    select(nuts3 = DEN_UTS, geometry) %>%
+    select(nuts1 = DEN_RIP, nuts2 = DEN_REG, nuts3 = DEN_UTS, geometry) %>% # Keep all 3 levels for dynamic filtering
     st_transform(32632)
   
   cat("Loading and spatially joining stations...\n")
@@ -138,7 +136,24 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
   stations_sf <- st_join(stations_sf, shp_data, join = st_intersects) %>%
     filter(!is.na(nuts3))
   
-  # 2. Apply Stratified Sampling
+  # 2. Regional Filtering Block
+  if (target_nuts_level != "all") {
+    cat(sprintf("Filtering stations strictly for %s: %s...\n", target_nuts_level, target_region_name))
+    if (target_nuts_level == "nuts1") {
+      stations_sf <- stations_sf %>% filter(nuts1 == target_region_name)
+    } else if (target_nuts_level == "nuts2") {
+      stations_sf <- stations_sf %>% filter(nuts2 == target_region_name)
+    } else if (target_nuts_level == "nuts3") {
+      stations_sf <- stations_sf %>% filter(nuts3 == target_region_name)
+    }
+    
+    if (nrow(stations_sf) == 0) {
+      stop(sprintf("Error: No stations found for %s = '%s'. Check your spelling in the main script.", 
+                   target_nuts_level, target_region_name))
+    }
+  }
+  
+  # 3. Apply Stratified Sampling (Always uses nuts3 internally to ensure even spatial distribution)
   cat("Applying stratified spatial sampling...\n")
   stations_sf <- stratified_spatial_sample(
     stations_sf, 
@@ -148,7 +163,7 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
   sampled_ids <- stations_sf$id_pump
   cat(sprintf("Sampled %d stations across %d regions.\n", length(sampled_ids), length(unique(stations_sf$nuts3))))
   
-  # 3. Iteratively load panel data
+  # 4. Iteratively load panel data
   rds_files <- list.files(rdata_dir, pattern = "\\.RDS$", full.names = TRUE)
   cat(sprintf("Iteratively loading and filtering %d panel data files...\n", length(rds_files)))
   
@@ -175,7 +190,7 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
     cat(sprintf("WARNING: %d files failed and were skipped.\n", length(failed_files)))
   }
   
-  # 4. Fetch and clean daily Brent data
+  # 5. Fetch and clean daily Brent data
   cat("Merging macro-economic and demographic data...\n")
   getSymbols("DCOILBRENTEU", src = "FRED", from = "2016-01-01", to = "2026-12-31", auto.assign = TRUE)
   brent_df <- data.frame(
@@ -185,7 +200,7 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
     complete(date = seq.Date(min(date), max(date), by = "day")) %>%
     mutate(brent_price = na.locf(brent_price, na.rm = FALSE))
   
-  # 5. Aggregate to weekly, THEN calculate differences
+  # 6. Aggregate to weekly, THEN calculate differences
   brent_weekly_df <- brent_df %>%
     group_by(year = year(date), week = week(date)) %>%
     reframe(brent_price_mean = mean(brent_price, na.rm = TRUE)) %>%
@@ -196,13 +211,13 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
       brent_diff_neg = replace_na(ifelse(brent_diff < 0, brent_diff, 0), 0)
     )
   
-  # 6. Join the complete weekly data to the main panel
+  # 7. Join the complete weekly data to the main panel
   df <- df %>%
     left_join(brent_weekly_df, by = c("year", "week")) %>%
     mutate(time_index = paste(year, sprintf("%02d", week), sep = "-"),
            city = str_replace_all(toupper(city), c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'")))
   
-  # 7. Join demographics and region mappings
+  # 8. Join demographics and region mappings
   df <- df %>%
     left_join(
       build_population_data(pop_dir) %>% 
@@ -211,7 +226,7 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
     left_join(build_city_areas(shp_path, nuts_path), by = "city") %>%
     mutate(population_density_km2 = population / area_sq_km)
   
-  # 8. Categorize brands
+  # 9. Categorize brands
   if (file.exists("data/brand_categories.csv")) {
     brand_map <- read_csv("data/brand_categories.csv")
   } else {
@@ -225,8 +240,11 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
            station_type = factor(station_type))
   
   if (isTRUE(test)) {
-    df <- df %>% 
-      filter(nuts1 == "Centro")
+    # If in test mode and 'all' was selected, enforce a small default region to prevent crash.
+    # Otherwise, respect the already filtered dataset.
+    if (target_nuts_level == "all") {
+      df <- df %>% filter(nuts1 == "Centro")
+    }
   }
   
   return(list(df = df, stations_sf = stations_sf, failed_files = failed_files))
