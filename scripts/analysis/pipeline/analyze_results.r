@@ -1,12 +1,12 @@
 # ------------------------------------------------------------------------------
-# 4. DIAGNOSTICS & COMPARISONS (UPDATED FOR DYNAMIC REGIONS)
+# 4. DIAGNOSTICS & COMPARISONS (UPDATED FOR CENTRAL DICTIONARY)
 # ------------------------------------------------------------------------------
 library(tidyverse)
 library(sf)
 library(ggplot2)
 library(jsonlite)
 
-analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
+analyze_standalone_results <- function(parts_dir, config, is_split = TRUE) {
   file_paths <- list.files(parts_dir, pattern = "\\.RDS$", full.names = TRUE)
   if(length(file_paths) == 0) stop("No RDS files found in the specified directory.")
   
@@ -15,7 +15,14 @@ analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
     
     c_df_part <- map_dfr(names(mod_data$models), function(m_name) {
       summ <- summary(mod_data$models[[m_name]])
-      c_df <- as.data.frame(summ$CoefTable)
+      
+      # Safely handle both spgm (CoefTable) and plm (coefficients) outputs
+      if ("CoefTable" %in% names(summ)) {
+        c_df <- as.data.frame(summ$CoefTable)
+      } else {
+        c_df <- as.data.frame(summ$coefficients)
+      }
+      
       colnames(c_df) <- c("estimate", "std_error", "t_value", "p_value")
       c_df$term <- rownames(c_df)
       c_df$model <- m_name
@@ -33,18 +40,29 @@ analyze_standalone_results <- function(parts_dir, is_split = TRUE) {
   
   rownames(coef_df) <- NULL
   
-  coef_df <- coef_df %>% mutate(term = case_when(
-    grepl("lambda|rho", term, ignore.case = TRUE) ~ "Spatial Lag (rho)",
-    grepl("mean_price_gasoline_self", term) ~ "Time Lag (Gasoline)",
-    grepl("brent_price_mean", term) ~ "Time Lag (Brent)",
-    grepl("brent_diff_pos", term) ~ "Time Lag (Brent Δ+)",
-    grepl("brent_diff_neg", term) ~ "Time Lag (Brent Δ-)",
-    TRUE ~ term
-  ))
+  # Map terms using the central dictionary
+  coef_df$term <- sapply(coef_df$term, function(x) {
+    if (x %in% names(config$term_labels)) {
+      return(config$term_labels[[x]])
+    } else if (grepl("W\\*", x)) { 
+      # splm manual Durbin naming
+      base_var <- gsub("W\\*", "", x)
+      clean_base <- ifelse(base_var %in% names(config$term_labels), config$term_labels[[base_var]], base_var)
+      return(paste("Wx", clean_base))
+    } else if (grepl("^Wx_", x)) {
+      # Our plm manual Durbin naming
+      base_var <- gsub("^Wx_", "", x)
+      clean_base <- ifelse(base_var %in% names(config$term_labels), config$term_labels[[base_var]], base_var)
+      return(paste("Wx", clean_base))
+    } else {
+      return(x)
+    }
+  })
   
   return(coef_df)
 }
 
+# (The rest of analyze_results.r remains identical as the plotting functions correctly handle the mapped data)
 plot_comparative_timeseries <- function(coef_df, target_term, title, is_split = TRUE) {
   plot_data <- coef_df %>% filter(term == target_term)
   if (nrow(plot_data) == 0) return(ggplot() + theme_void() + labs(title = paste("Missing data for", target_term)))
@@ -58,10 +76,6 @@ plot_comparative_timeseries <- function(coef_df, target_term, title, is_split = 
   if (is_split) p <- p + facet_wrap(~ region, scales = "free_y")
   return(p)
 }
-
-# ------------------------------------------------------------------------------
-# 5. SUMMARY AND MAP GENERATION FUNCTIONS
-# ------------------------------------------------------------------------------
 
 generate_summary_table <- function(stats_data) {
   summary_table <- stats_data %>%
@@ -81,16 +95,11 @@ generate_summary_table <- function(stats_data) {
 plot_coefficient_maps <- function(summary_table, shp_path, nuts_path, 
                                   target_nuts_level = "nuts1", target_model = "SDM", 
                                   target_term = "Spatial Lag (rho)") {
-  
-  # 1. Load and prepare geographic bounds
   nuts_data <- as.data.frame(fromJSON(nuts_path)$resultset) %>% 
     select(PRO_COM, contains("DEN")) %>% 
     rename(nuts1 = DEN_RIP, nuts2 = DEN_REG, nuts3 = DEN_UTS)
   
-  shp_data <- st_read(shp_path, quiet = TRUE) %>%
-    left_join(nuts_data, by = c("PRO_COM" = "PRO_COM"))
-  
-  # 2. Aggregate municipal geometries dynamically based on target_nuts_level
+  shp_data <- st_read(shp_path, quiet = TRUE) %>% left_join(nuts_data, by = c("PRO_COM" = "PRO_COM"))
   level_sym <- sym(target_nuts_level)
   
   region_polygons <- shp_data %>%
@@ -98,13 +107,9 @@ plot_coefficient_maps <- function(summary_table, shp_path, nuts_path,
     summarise(geometry = st_union(geometry), .groups = "drop") %>%
     rename(region = !!level_sym) 
   
-  # 3. Filter statistical data
   stats_subset <- summary_table %>% filter(model == target_model, term == target_term)
-  
-  # 4. Join geometries with the model estimates
   map_data <- region_polygons %>% left_join(stats_subset, by = "region")
   
-  # 5. Generate Map
   p_map <- ggplot(data = map_data) +
     geom_sf(aes(fill = mean_estimate), color = "white", linewidth = 0.3) +
     scale_fill_viridis_c(option = "magma", na.value = "grey80") +
@@ -123,42 +128,28 @@ plot_coefficient_maps <- function(summary_table, shp_path, nuts_path,
   return(list(plot = p_map, map_data = map_data))
 }
 
-# ------------------------------------------------------------------------------
-# 6. PIPELINE WRAPPER AND SUMMARY PLOTTER
-# ------------------------------------------------------------------------------
-
 plot_summary_statistics <- function(summary_table, terms_to_plot = NULL) {
   plot_data <- summary_table %>% filter(term != "(Intercept)")
-  
-  if (!is.null(terms_to_plot)) {
-    plot_data <- plot_data %>% filter(term %in% terms_to_plot)
-  }
+  if (!is.null(terms_to_plot)) plot_data <- plot_data %>% filter(term %in% terms_to_plot)
   
   p <- ggplot(plot_data, aes(y = reorder(model, mean_estimate), x = mean_estimate, color = model)) +
     geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
-    geom_linerange(aes(xmin = mean_estimate - sd_estimate, xmax = mean_estimate + sd_estimate), 
-                   linewidth = 1.2, alpha = 0.6) +
+    geom_linerange(aes(xmin = mean_estimate - sd_estimate, xmax = mean_estimate + sd_estimate), linewidth = 1.2, alpha = 0.6) +
     geom_point(size = 3.5) +
     geom_point(aes(x = median_estimate), size = 1.5, shape = 21, fill = "white", stroke = 1) +
     theme_minimal() +
     labs(
       title = "Coefficient Stability and Central Tendency",
       subtitle = "Solid dot = Mean | White dot = Median | Lines = ±1 SD",
-      x = "Coefficient Estimate",
-      y = "Model Specification"
+      x = "Coefficient Estimate", y = "Model Specification"
     ) +
-    theme(
-      legend.position = "none",
-      strip.text = element_text(face = "bold", size = 11),
-      axis.text.y = element_text(face = "bold", size = 10),
-      panel.grid.minor = element_blank()
-    )
+    theme(legend.position = "none", strip.text = element_text(face = "bold", size = 11),
+          axis.text.y = element_text(face = "bold", size = 10), panel.grid.minor = element_blank())
   
   if ("region" %in% colnames(plot_data) && length(unique(plot_data$region)) > 1) {
     p <- p + facet_grid(region ~ term, scales = "free_x")
   } else {
     p <- p + facet_wrap(~ term, scales = "free_x", ncol = 2)
   }
-  
   return(p)
 }
