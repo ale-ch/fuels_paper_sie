@@ -140,11 +140,11 @@ prepare_integrated_panel <- function(rdata_dir, stations_list_file, pop_dir, shp
   if (scope_level != "all") {
     cat(sprintf("Filtering stations strictly for scope %s: %s...\n", scope_level, scope_name))
     if (scope_level == "nuts1") {
-      stations_sf <- stations_sf %>% filter(nuts1 == scope_name)
+      stations_sf <- stations_sf %>% filter(nuts1 %in% scope_name)
     } else if (scope_level == "nuts2") {
-      stations_sf <- stations_sf %>% filter(nuts2 == scope_name)
+      stations_sf <- stations_sf %>% filter(nuts2 %in% scope_name)
     } else if (scope_level == "nuts3") {
-      stations_sf <- stations_sf %>% filter(nuts3 == scope_name)
+      stations_sf <- stations_sf %>% filter(nuts3 %in% scope_name)
     }
     
     if (nrow(stations_sf) == 0) {

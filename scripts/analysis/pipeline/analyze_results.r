@@ -191,6 +191,48 @@ generate_summary_table <- function(stats_data) {
   return(summary_table)
 }
 
+# ------------------------------------------------------------------------------
+# 6. SENSITIVITY VISUALIZATION
+# ------------------------------------------------------------------------------
+plot_radius_sensitivity <- function(all_radiuses_df, output_dir) {
+  sens_dir <- file.path(output_dir, "sensitivity_plots")
+  if (!dir.exists(sens_dir)) dir.create(sens_dir, recursive = TRUE)
+  
+  plot_data <- all_radiuses_df %>% filter(term != "(Intercept)")
+  unique_terms <- unique(plot_data$term)
+  
+  cat("\nGenerating sensitivity plots...\n")
+  
+  for (t in unique_terms) {
+    sub_data <- plot_data %>% 
+      filter(term == t) %>%
+      mutate(is_sig = ifelse(mean_p_value < 0.05, "Sig (p<0.05)", "Not Sig"))
+    
+    if (nrow(sub_data) == 0) next
+    
+    p <- ggplot(sub_data, aes(x = as.factor(radius), y = mean_estimate, color = model, group = model)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+      geom_line(linewidth = 0.8, position = position_dodge(width = 0.3)) +
+      geom_point(aes(shape = is_sig), size = 3, position = position_dodge(width = 0.3)) +
+      geom_errorbar(aes(ymin = mean_estimate - sd_estimate, ymax = mean_estimate + sd_estimate), 
+                    width = 0.2, position = position_dodge(width = 0.3), alpha = 0.5) +
+      scale_shape_manual(values = c("Sig (p<0.05)" = 19, "Not Sig" = 4)) +
+      theme_minimal() +
+      labs(title = paste("Sensitivity to Spatial Radius:", t),
+           x = "Radius (meters)", y = "Mean Coefficient Estimate", shape = "Significance") +
+      theme(legend.position = "right", strip.text = element_text(face = "bold", size = 11))
+    
+    if (length(unique(sub_data$region)) > 1) {
+      p <- p + facet_wrap(~ region, scales = "free_y")
+    }
+    
+    safe_term <- gsub("[^A-Za-z0-9]", "_", t)
+    ggsave(file.path(sens_dir, paste0("sensitivity_", safe_term, ".png")), plot = p, width = 10, height = 6, bg = "white")
+  }
+  
+  cat("Sensitivity plots saved to:", sens_dir, "\n")
+}
+
 plot_coefficient_maps <- function(summary_table, shp_path, nuts_path, 
                                   target_nuts_level = "nuts1", target_model = "SDM", 
                                   target_term = "Spatial Lag (rho)") {
