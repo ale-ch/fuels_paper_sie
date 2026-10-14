@@ -1,3 +1,14 @@
+library(tidyverse)
+library(sf)
+library(quantmod)
+library(zoo)
+library(lubridate)
+library(readxl)
+library(spdep)
+library(plm)
+library(splm)
+library(jsonlite)
+
 rdata_dir       <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
 stations_list_file    <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
 pop_dir         <- "/Volumes/T7 Shield/FRES/fuels_data/population"
@@ -6,6 +17,67 @@ nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
 mappings_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly" 
 base_output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
 
+build_population_data <- function(base_dir, overwrite = FALSE) {
+  if(!file.exists(file.path(base_dir, "city_population.csv")) | isTRUE(overwrite)) {
+    singola_area_dir <- file.path(base_dir, "PopolazioneEta-SingolaArea-Comuni")
+    
+    posas_files <- list.files(base_dir, pattern = "POSAS", full.names = TRUE)
+    population_posas <- map_dfr(posas_files, function(file_path) {
+      extracted_year <- as.numeric(str_extract(basename(file_path), "\\d{4}"))
+      read_delim(file_path, delim = ";", skip = 1, show_col_types = FALSE) %>% 
+        rename(id_city = `Codice comune`, city = Comune, population = Totale, age = Età) %>% 
+        filter(age == 999, extracted_year > 2019) %>% 
+        mutate(year = extracted_year) %>% 
+        select(id_city, city, year, population)
+    })
+    
+    process_singola_area <- function(file_path) {
+      lines <- readLines(file_path, warn = FALSE)
+      lines <- lines[lines != ""]
+      meta_match <- str_match(str_remove_all(lines[1], '"'), "Comune:\\s*(\\d+)\\s*-\\s*(.+)$")
+      
+      if (is.na(meta_match[1])) return(NULL)
+      
+      header_idx <- grep("Età/Anno", lines)[1]
+      totale_idx <- grep("^\"?Totale;", lines)[1]
+      if (is.na(header_idx) || is.na(totale_idx)) return(NULL)
+      
+      read.csv(text = paste(lines[header_idx], lines[totale_idx], sep = "\n"), 
+               sep = ";", check.names = FALSE, stringsAsFactors = FALSE) %>%
+        pivot_longer(cols = -1, names_to = "year", values_to = "population") %>%
+        mutate(id_city = as.numeric(meta_match[2]), city = meta_match[3], 
+               year = as.numeric(year), population = as.numeric(population)) %>%
+        select(id_city, city, year, population)
+    }
+    
+    singola_area_files <- list.files(singola_area_dir, pattern = "\\.csv$", full.names = TRUE)
+    
+    pop_final <- bind_rows(
+      mutate(population_posas, id_city = as.numeric(id_city)), 
+      map_dfr(singola_area_files, process_singola_area)
+    ) %>% filter(year >= 2016) %>% arrange(id_city, year)
+    
+    pop_final$city <- str_replace_all(toupper(pop_final$city), 
+                                      c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
+    
+    pop_final <- pop_final %>% 
+      group_by(city) %>% 
+      reframe(
+        year,
+        population,
+        n = n()
+      ) %>% 
+      filter(n <= 11) %>% 
+      select(-n) %>% 
+      ungroup()
+    
+    write_csv(pop_final, file.path(base_dir, "city_population.csv"))
+  } else {
+    pop_final <- read_csv(file.path(base_dir, "city_population.csv")) 
+  }
+  
+  return(pop_final)
+}
 
 prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path) {
   # 1. Load and spatially join stations to NUTS regions for sampling
@@ -100,7 +172,7 @@ prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path,
            city = str_replace_all(toupper(city), c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'")))
   
   
-  return(list(df = df, stations_sf = stations_sf, failed_files = failed_files))
+  return(list(df = df_joined, stations_sf = stations_sf, failed_files = failed_files))
 }
 
 base_data <- prepare_panel_data(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path)

@@ -12,8 +12,8 @@ library(plm)
 library(splm)
 library(jsonlite)
 
-build_population_data <- function(base_dir) {
-  if(!file.exists(file.path(base_dir, "city_population.csv"))) {
+build_population_data <- function(base_dir, overwrite = FALSE) {
+  if(!file.exists(file.path(base_dir, "city_population.csv")) | isTRUE(overwrite)) {
     singola_area_dir <- file.path(base_dir, "PopolazioneEta-SingolaArea-Comuni")
     
     posas_files <- list.files(base_dir, pattern = "POSAS", full.names = TRUE)
@@ -54,6 +54,17 @@ build_population_data <- function(base_dir) {
     
     pop_final$city <- str_replace_all(toupper(pop_final$city), 
                                       c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
+    
+    pop_final <- pop_final %>% 
+      group_by(city) %>% 
+      reframe(
+        year,
+        population,
+        n = n()
+      ) %>% 
+      filter(n <= 11) %>% 
+      select(-n) %>% 
+      ungroup()
     
     write_csv(pop_final, file.path(base_dir, "city_population.csv"))
   } else {
