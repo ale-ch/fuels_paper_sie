@@ -184,18 +184,17 @@ fit_spatial_models <- function(df, W, formula, config) {
   return(fitted_models)
 }
 
+
 # ------------------------------------------------------------------------------
-# 3. MAIN EXECUTION LOOP
+# UPDATED EXECUTION LOOP
 # ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
                                    estimation_granularity = "nuts2", output_dir,
                                    sample_fraction = 1.0, random_seed = 42) {
   
   set.seed(random_seed)
-  
   setup_logging(output_dir, config)
   
-  # Track failure percentages for RAM tuning
   total_models_attempted <- 0
   total_models_failed <- 0
   
@@ -210,6 +209,25 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   
   # Apply sampling to reduce vector memory limits
   working_df <- apply_stratified_sampling(base_data$df, estimation_granularity, sample_fraction, random_seed)
+  
+  # --- NEW: SAVE RUN CONFIGURATION AND SAMPLED IDs ---
+  run_config <- list(
+    timestamp = Sys.time(),
+    config_params = config,
+    formula = deparse(formula),
+    radiuses = radiuses,
+    window_size = window_size,
+    estimation_granularity = estimation_granularity,
+    sample_fraction = sample_fraction,
+    random_seed = random_seed,
+    sampled_id_pumps = unique(working_df$id_pump)
+  )
+  
+  config_file_name <- paste0("run_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".RDS")
+  config_path <- file.path(output_dir, config_file_name)
+  saveRDS(run_config, config_path)
+  log_msg("Run configuration and sampled id_pump list saved to: ", config_path)
+  # ---------------------------------------------------
   
   log_msg("CLEARING MEMORY - remove base_data")
   rm(base_data)
@@ -249,7 +267,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         
         fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
         
-        # Track failures
         expected_models <- length(config$spatial_models)
         successful_models <- length(fitted_models)
         failed_models <- expected_models - successful_models
@@ -274,13 +291,10 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
                                gsub("[^A-Za-z0-9]", "_", region_name), 
                                rad, start_week, end_week)
           
-          # saveRDS(payload, file.path(output_dir, file_name))
           log_msg(paste("SAVING MODEL DATA TO", file.path(output_dir, file_name)))
           create_coef_df(payload, file.path(output_dir, file_name))
-          
         }
         
-        # Aggressive Garbage Collection to prevent 18.0 Gb vector memory crash
         rm(window_data, aligned_data, fitted_models, payload)
         gc(full = TRUE)
         
@@ -289,7 +303,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     }
   }
   
-  # Final Failure Report
   fail_rate <- (total_models_failed / max(1, total_models_attempted)) * 100
   log_msg("=== PIPELINE COMPLETE ===")
   log_msg(sprintf("Total Models Attempted: %d", total_models_attempted))
@@ -297,13 +310,18 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   log_msg(sprintf("Failure Rate:           %.2f%%", fail_rate))
 }
 
-
+# ------------------------------------------------------------------------------
+# UPDATED RESULT COLLECTION
+# ------------------------------------------------------------------------------
 collect_results <- function(directory_path, output_path, pattern = "\\.RDS$") {
   
   file_paths <- list.files(path = directory_path, pattern = pattern, full.names = TRUE)
   
+  # Prevent reading the configuration files as model output
+  file_paths <- file_paths[!grepl("run_config", file_paths)]
+  
   if (length(file_paths) == 0) {
-    warning(paste("No files matching pattern", pattern, "found in", directory_path))
+    warning(paste("No result files matching pattern", pattern, "found in", directory_path))
     return(NULL)
   }
   
@@ -316,8 +334,9 @@ collect_results <- function(directory_path, output_path, pattern = "\\.RDS$") {
     })
   })
   
-  return(combined_df)
+  # saveRDS must execute before return()
   saveRDS(combined_df, output_path)
+  return(combined_df)
 }
 
 
@@ -334,7 +353,6 @@ run_rolling_estimation(base_data_path, config, formula, radiuses, window_size,
                        sample_fraction = 0.05, random_seed)
 
 results <- collect_results(output_dir, output_path)
-
 
 
 
