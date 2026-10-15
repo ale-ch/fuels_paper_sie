@@ -13,7 +13,8 @@ rdata_dir       <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
 stations_list_file    <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
 pop_dir         <- "/Volumes/T7 Shield/FRES/fuels_data/population"
 shp_path        <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
-nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
+# nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
+nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/nuts_data.csv"
 mappings_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly" 
 base_output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
 
@@ -82,28 +83,51 @@ build_population_data <- function(base_dir, overwrite = FALSE) {
 prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path) {
   # 1. Load and spatially join stations to NUTS regions for sampling
   cat("Loading geographic boundaries for spatial sampling...\n")
-  nuts_data <- as.data.frame(fromJSON(nuts_path)$resultset)
+  
+  nuts_data <- read_delim(nuts_path, delim = ";")
+  nuts_data <- nuts_data %>% 
+    select(
+      nuts1 = NUTS1, nuts2 = NUTS2, nuts3 = NUTS3, PRO_COM = `Codice comune (numerico)`
+    )
+  
+  shp_data <- st_read(shp_path, quiet = TRUE)
+  
+  diff_keys <- nuts_data$PRO_COM[which(!nuts_data$PRO_COM %in% shp_data$PRO_COM)]
+  diff_keys2 <- shp_data$PRO_COM[which(!(shp_data$PRO_COM) %in% nuts_data$PRO_COM)]
+  
+  nuts_data <- nuts_data %>% 
+    filter(!(PRO_COM %in% diff_keys))
+  
+  shp_data <- shp_data %>% 
+    filter(!(PRO_COM %in% diff_keys2))
+  
   shp_data <- st_read(shp_path, quiet = TRUE) %>%
     mutate(
       area_sq_km = Shape_Area / 1000000
     ) %>% 
-    left_join(nuts_data %>% select(PRO_COM, DEN_RIP, DEN_REG, DEN_UTS), by = c("PRO_COM")) %>%
-    select(nuts1 = DEN_RIP, nuts2 = DEN_REG, nuts3 = DEN_UTS, city = COMUNE, area_sq_km, geometry) %>% # Keep all 3 levels for dynamic filtering
+    left_join(nuts_data, by = c("PRO_COM")) %>%
+    select(nuts1, nuts2, nuts3, city = COMUNE, area_sq_km, geometry) %>% # Keep all 3 levels for dynamic filtering
     filter(!duplicated(city)) %>% 
-    st_transform(32632)
+    st_transform(32632) %>% 
+    na.omit()
   
   shp_data$city <- str_replace_all(toupper(shp_data$city), 
                                    c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
   
+  
   cat("Loading and spatially joining stations...\n")
   stations_sf <- read_delim(stations_list_file, delim = "|", show_col_types = FALSE) %>%
-    select(-c(address, contains("Estrazione"))) %>%
+    select(-c(address, province, contains("Estrazione"))) %>%
     filter(!is.na(latitude), !is.na(longitude)) %>%
     st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
-    st_transform(32632) %>% arrange(id_pump) 
+    st_transform(32632) %>% arrange(id_pump)
   
-  stations_sf <- stations_sf %>% st_drop_geometry() %>% 
-    left_join(shp_data, by = "city") %>%
+  stations_sf$city <- str_replace_all(toupper(stations_sf$city), 
+                                      c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
+  
+  stations_sf <- stations_sf %>% 
+    st_drop_geometry() %>%
+    left_join(shp_data , by = "city") %>%
     filter(!is.na(nuts3))
   
   
@@ -132,7 +156,11 @@ prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path,
   }
   
   df_joined <- df %>% 
-    left_join(stations_sf %>% select(id_pump, area_sq_km, contains("nuts")), by = "id_pump")
+    filter(id_pump %in% stations_sf$id_pump) %>% 
+    left_join(
+      stations_sf %>% st_drop_geometry() %>% select(id_pump, contains("nuts"), area_sq_km), 
+      by = "id_pump"
+    )
   
   population_data <- build_population_data(pop_dir, overwrite = FALSE)
   
@@ -140,7 +168,7 @@ prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path,
   
   df_joined <- df_joined %>% 
     mutate(
-      population_density = population / area_sq_km
+      population_density_km2 = population / area_sq_km
     )
   
   # 5. Fetch and clean daily Brent data
@@ -178,3 +206,4 @@ prepare_panel_data <- function(rdata_dir, stations_list_file, pop_dir, shp_path,
 base_data <- prepare_panel_data(rdata_dir, stations_list_file, pop_dir, shp_path, mappings_dir, nuts_path)
 
 
+# saveRDS(base_data, "/Volumes/T7 Shield/FRES/fuels_data/dataset.RDS")
