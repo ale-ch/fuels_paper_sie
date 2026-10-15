@@ -126,6 +126,7 @@ stations_csv    <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_li
 pop_dir         <- "/Volumes/T7 Shield/FRES/fuels_data/population"
 shp_path        <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
 nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
+# nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/nuts_data.csv"
 mappings_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly" 
 base_output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
 
