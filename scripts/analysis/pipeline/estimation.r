@@ -228,171 +228,118 @@ fit_spatial_models <- function(df, W, formula, config) {
 # ------------------------------------------------------------------------------
 # UPDATED EXECUTION LOOP WITH OVERALL PROGRESS & ETA
 # ------------------------------------------------------------------------------
-run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
-                                   estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"),
-                                   output_dir,
-                                   sample_fraction = 1.0, random_seed = 42,
-                                   n_cores = NULL) {
+run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size,
+                                   estimation_granularity = c("nuts0","nuts1","nuts2","nuts3"),
+                                   output_dir, sample_fraction = 1.0, random_seed = 42, cores=1) {
   
   match.arg(estimation_granularity)
   set.seed(random_seed)
   
-  log_msg("LOADING DATA")
-  base_data <- readRDS(base_data_path)
-  
+  base_data  <- readRDS(base_data_path)
   if (!is.numeric(base_data$df$time_index)) {
-    log_msg("WARNING: time_index is not numeric. Forcing conversion to sequential integers.")
     base_data$df <- base_data$df %>%
       mutate(time_index = as.integer(factor(time_index, ordered = TRUE)))
   }
-  
   working_df <- apply_stratified_sampling(base_data$df, estimation_granularity,
                                           sample_fraction, random_seed)
-  
-  run_config <- list(
-    timestamp = Sys.time(),
-    config_params = config,
-    formula = deparse(formula),
-    radiuses = radiuses,
-    window_size = window_size,
-    estimation_granularity = estimation_granularity,
-    sample_fraction = sample_fraction,
-    random_seed = random_seed,
-    sampled_id_pumps = unique(working_df$id_pump)
-  )
-  
-  config_file_name <- paste0("run_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".RDS")
-  config_path <- file.path(output_dir, config_file_name)
-  saveRDS(run_config, config_path)
-  log_msg("Run configuration and sampled id_pump list saved to: ", config_path)
-  
-  log_msg("CLEARING MEMORY - remove base_data")
   rm(base_data); gc()
   
-  if (estimation_granularity == "nuts0") {
-    regions <- "Italy"
-  } else {
-    regions <- unique(working_df[[estimation_granularity]])
-  }
-  valid_regions <- regions[!is.na(regions)]
-  
+  regions  <- if (estimation_granularity == "nuts0") "Italy"
+  else na.omit(unique(working_df[[estimation_granularity]]))
   min_week <- min(working_df$time_index, na.rm = TRUE)
   max_week <- max(working_df$time_index, na.rm = TRUE)
-  log_msg("Global time_index range: ", min_week, " to ", max_week)
   
-  # --------------------------------------------------------------------------
-  # Build flat task list (resume-aware: skip tasks whose output already exists)
-  # --------------------------------------------------------------------------
-  tasks <- list()
-  for (region_name in valid_regions) {
-    for (rad in radiuses) {
-      sw <- min_week
-      while ((sw + window_size - 1) <= max_week) {
-        ew <- sw + window_size - 1
-        fname <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS",
-                         gsub("[^A-Za-z0-9]", "_", region_name), rad, sw, ew)
-        target <- file.path(output_dir, fname)
-        if (!file.exists(target)) {
-          tasks[[length(tasks) + 1L]] <- list(
-            region      = region_name,
-            radius      = rad,
-            start_week  = sw,
-            end_week    = ew,
-            target_file = target
-          )
-        }
-        sw <- sw + 1
-      }
+  worker_log_dir <- file.path(output_dir, "worker_logs")
+  dir.create(worker_log_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # --- build the full expected task list ---
+  all_tasks <- list()
+  for (r in regions) for (rad in radiuses) {
+    sw <- min_week
+    while (sw + window_size - 1 <= max_week) {
+      ew <- sw + window_size - 1
+      all_tasks[[length(all_tasks) + 1L]] <- list(
+        region = r, radius = rad, start_week = sw, end_week = ew,
+        target_file = file.path(output_dir,
+                                sprintf("res_%s_rad%d_w%03d_w%03d.RDS",
+                                        gsub("[^A-Za-z0-9]", "_", r), rad, sw, ew))
+      )
+      sw <- sw + 1
     }
   }
   
-  log_msg("Total tasks to run: ", length(tasks))
-  if (length(tasks) == 0) {
-    log_msg("Nothing to do (all outputs already exist).")
-    return(invisible(NULL))
-  }
+  # --- setdiff-based resume ---
+  expected <- vapply(all_tasks, `[[`, character(1), "target_file")
+  existing <- list.files(output_dir, pattern = "^res_.*\\.RDS$", full.names = TRUE)
+  todo     <- setdiff(expected, existing)
+  tasks    <- all_tasks[expected %in% todo]
   
-  if (is.null(n_cores)) n_cores <- max(1L, parallel::detectCores() - 1L)
-  n_cores <- min(n_cores, length(tasks))
-  log_msg("Parallelizing with ", n_cores, " workers.")
+  log_msg("Expected: ", length(expected),
+          " | Existing: ", length(existing),
+          " | To run: ", length(tasks))
+  if (!length(tasks)) return(invisible(NULL))
   
-  cl <- parallel::makeCluster(n_cores)
+  # cl <- parallel::makeCluster(max(1L, parallel::detectCores() - 1L))
+  cl <- parallel::makeCluster(cores)
+  on.exit({ parallel::stopCluster(cl); foreach::registerDoSEQ() }, add = TRUE)
   doParallel::registerDoParallel(cl)
-  on.exit({
-    try(parallel::stopCluster(cl), silent = TRUE)
-    try(foreach::registerDoSEQ(), silent = TRUE)
-  }, add = TRUE)
   
-  # --------------------------------------------------------------------------
-  # Dispatch
-  # --------------------------------------------------------------------------
-  results <- foreach::foreach(
+  foreach::foreach(
     task = tasks,
-    .packages = c("dplyr", "sf", "spdep", "plm", "splm", "tidyverse"),
-    .export   = c("config", "formula", "window_size", "estimation_granularity",
-                  "working_df",
-                  "prepare_window_data", "compute_distance_matrix",
-                  "fit_spatial_models", "create_coef_df"),
+    .packages = c("dplyr","sf","spdep","plm","splm","tidyverse"),
+    .export   = c("config","formula","window_size","estimation_granularity","working_df",
+                  "worker_log_dir",
+                  "prepare_window_data","compute_distance_matrix",
+                  "fit_spatial_models","create_coef_df"),
     .errorhandling = "pass"
   ) %dopar% {
     
-    # Silence logger on workers to avoid shared-file contention.
-    assign("log_msg", function(...) invisible(NULL), envir = globalenv())
+    # --- open this worker's own log once, cache the closure in .GlobalEnv ---
+    if (!isTRUE(get0(".worker_log_ready", envir = globalenv(), inherits = FALSE))) {
+      conn <- file(file.path(worker_log_dir, sprintf("worker_%d.log", Sys.getpid())),
+                   open = "a")
+      assign("log_msg", local({
+        c <- conn
+        function(...) {
+          cat(format(Sys.time(), "%H:%M:%S"), "|", paste0(..., collapse = ""), "\n",
+              file = c, sep = "")
+          flush(c)
+        }
+      }), envir = globalenv())
+      assign(".worker_log_ready", TRUE, envir = globalenv())
+      log_msg("Worker up. PID=", Sys.getpid())
+    }
     
     tryCatch({
-      region_df <- if (task$region == "Italy") {
-        working_df
-      } else {
-        working_df[working_df[[estimation_granularity]] == task$region, , drop = FALSE]
-      }
+      log_msg("Task: region=", task$region, " rad=", task$radius,
+              " w=", task$start_week, "-", task$end_week)
       
-      window_data <- prepare_window_data(region_df, task$start_week, window_size)
-      if (is.null(window_data)) return(list(ok = TRUE, file = NA_character_))
+      region_df <- if (task$region == "Italy") working_df
+      else working_df[working_df[[estimation_granularity]] == task$region, , drop = FALSE]
       
-      aligned_data <- compute_distance_matrix(window_data, task$radius)
-      if (is.null(aligned_data)) return(list(ok = TRUE, file = NA_character_))
+      win <- prepare_window_data(region_df, task$start_week, window_size)
+      if (is.null(win)) { log_msg("  -> skip: no window"); return(NULL) }
       
-      fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
+      aligned <- compute_distance_matrix(win, task$radius)
+      if (is.null(aligned)) { log_msg("  -> skip: no matrix"); return(NULL) }
       
-      if (length(fitted_models) > 0) {
-        payload <- list(
-          models                 = fitted_models,
-          window                 = window_size,
-          start_week             = task$start_week,
-          end_week               = task$end_week,
-          region                 = task$region,
-          radius                 = task$radius,
-          estimation_granularity = estimation_granularity
-        )
-        create_coef_df(payload, task$target_file)
-        return(list(ok = TRUE, file = task$target_file))
-      }
-      list(ok = TRUE, file = NA_character_)
-    },
-    error = function(e) {
-      list(ok = FALSE, file = task$target_file,
-           msg = paste0(task$region, "|rad=", task$radius,
-                        "|w=", task$start_week, "-", task$end_week,
-                        "|", conditionMessage(e)))
+      fitted <- fit_spatial_models(aligned$df, aligned$W, formula, config)
+      if (!length(fitted)) { log_msg("  -> skip: no models"); return(NULL) }
+      
+      create_coef_df(list(
+        models = fitted, window = window_size,
+        start_week = task$start_week, end_week = task$end_week,
+        region = task$region, radius = task$radius,
+        estimation_granularity = estimation_granularity
+      ), task$target_file)
+      log_msg("  -> wrote ", basename(task$target_file))
+      task$target_file
+    }, error = function(e) {
+      log_msg("  !! ERROR: ", conditionMessage(e))
+      NULL
     })
   }
-  
-  # --------------------------------------------------------------------------
-  # Summary
-  # --------------------------------------------------------------------------
-  ok_flags <- vapply(results, function(x) isTRUE(x$ok), logical(1))
-  wrote    <- vapply(results, function(x) isTRUE(x$ok) && !is.na(x$file), logical(1))
-  
-  log_msg("=== PARALLEL PIPELINE COMPLETE ===")
-  log_msg(sprintf("Tasks: %d | OK: %d | Errors: %d | New files written: %d",
-                  length(tasks), sum(ok_flags), sum(!ok_flags), sum(wrote)))
-  
-  if (any(!ok_flags)) {
-    log_msg("Errors:")
-    for (x in results[!ok_flags]) log_msg("  - ", x$msg)
-  }
-  
-  invisible(results)
+  invisible(NULL)
 }
 
 # ------------------------------------------------------------------------------
