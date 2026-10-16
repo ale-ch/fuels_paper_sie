@@ -14,7 +14,9 @@ option_list = list(
   make_option(c("--sample_fraction"), type="double", default=0.05, help="Sample fraction"),
   make_option(c("--test"), action="store_true", default=FALSE, help="Boolean flag for test mode"),
   make_option(c("--verbose"), type="logical", default=TRUE, help="Print logs to console (TRUE/FALSE)"),
-  make_option(c("--run_dir"),  type="character", default=NULL, help="Path to existing run directory")
+  make_option(c("--run_dir"),  type="character", default=NULL, help="Path to existing run directory"),
+  make_option(c("--n_cores"), type="integer", default=NULL,
+              help="Parallel workers (default: detectCores()-1)")
 )
 
 opt_parser = OptionParser(option_list=option_list)
@@ -65,7 +67,8 @@ main <- function(data_dir, output_dir, formula, radiuses, window_size, estimatio
   log_msg("Starting estimation phase...")
   run_rolling_estimation(base_data_path, config, formula, radiuses, window_size, 
                          estimation_granularity, run_dir,
-                         sample_fraction, random_seed)
+                         sample_fraction, random_seed,
+                         n_cores = opt$n_cores)
   
   log_msg("Collecting rolling window results...")
   results <- collect_results(run_dir, results_file_path)

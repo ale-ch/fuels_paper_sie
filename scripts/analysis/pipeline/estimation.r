@@ -229,14 +229,13 @@ fit_spatial_models <- function(df, W, formula, config) {
 # UPDATED EXECUTION LOOP WITH OVERALL PROGRESS & ETA
 # ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
-                                   estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"), output_dir,
-                                   sample_fraction = 1.0, random_seed = 42) {
+                                   estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"),
+                                   output_dir,
+                                   sample_fraction = 1.0, random_seed = 42,
+                                   n_cores = NULL) {
   
   match.arg(estimation_granularity)
   set.seed(random_seed)
-  
-  total_models_attempted <- 0
-  total_models_failed <- 0
   
   log_msg("LOADING DATA")
   base_data <- readRDS(base_data_path)
@@ -247,7 +246,8 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
       mutate(time_index = as.integer(factor(time_index, ordered = TRUE)))
   }
   
-  working_df <- apply_stratified_sampling(base_data$df, estimation_granularity, sample_fraction, random_seed)
+  working_df <- apply_stratified_sampling(base_data$df, estimation_granularity,
+                                          sample_fraction, random_seed)
   
   run_config <- list(
     timestamp = Sys.time(),
@@ -267,129 +267,132 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   log_msg("Run configuration and sampled id_pump list saved to: ", config_path)
   
   log_msg("CLEARING MEMORY - remove base_data")
-  rm(base_data)
-  gc()
+  rm(base_data); gc()
   
-  if(estimation_granularity == "nuts0") {
+  if (estimation_granularity == "nuts0") {
     regions <- "Italy"
   } else {
     regions <- unique(working_df[[estimation_granularity]])
   }
+  valid_regions <- regions[!is.na(regions)]
   
   min_week <- min(working_df$time_index, na.rm = TRUE)
   max_week <- max(working_df$time_index, na.rm = TRUE)
-  
   log_msg("Global time_index range: ", min_week, " to ", max_week)
   
-  # Progress tracking setup
-  valid_regions <- regions[!is.na(regions)]
-  total_windows <- max_week - window_size + 1 - min_week + 1
-  total_iterations <- length(valid_regions) * length(radiuses) * total_windows
-  current_iteration <- 0
-  computed_iterations <- 0
-  
-  log_msg("Total expected iterations: ", total_iterations)
-  loop_start_time <- as.numeric(Sys.time())
-  
+  # --------------------------------------------------------------------------
+  # Build flat task list (resume-aware: skip tasks whose output already exists)
+  # --------------------------------------------------------------------------
+  tasks <- list()
   for (region_name in valid_regions) {
-    if(region_name == "Italy") {
-      region_df <- working_df
-    } else {
-      region_df <- working_df %>% filter(!!sym(estimation_granularity) == region_name)
-    }
-    
     for (rad in radiuses) {
-      start_week <- min_week
-      
-      while ((start_week + window_size - 1) <= max_week) {
-        end_week <- start_week + window_size - 1
-        current_iteration <- current_iteration + 1
-        
-        file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", 
-                             gsub("[^A-Za-z0-9]", "_", region_name), 
-                             rad, start_week, end_week)
-        target_file_path <- file.path(output_dir, file_name)
-        
-        # ETA and Progress Calculation
-        pct <- (current_iteration / total_iterations) * 100
-        
-        if (computed_iterations > 0) {
-          current_time <- as.numeric(Sys.time())
-          elapsed <- current_time - loop_start_time
-          time_per_iter <- elapsed / computed_iterations
-          eta_secs <- (total_iterations - current_iteration) * time_per_iter
-          
-          eta_h <- floor(eta_secs / 3600)
-          eta_m <- floor((eta_secs %% 3600) / 60)
-          eta_s <- floor(eta_secs %% 60)
-        } else {
-          eta_h <- 0; eta_m <- 0; eta_s <- 0
-        }
-        
-        cat(sprintf("\r[%5.1f%%] Iter: %d/%d | Reg: %-6s | Rad: %-5d | Win: %03d-%03d | ETA: %02d:%02d:%02d          ", 
-                    pct, current_iteration, total_iterations, 
-                    substr(region_name, 1, 6), rad, start_week, end_week, 
-                    eta_h, eta_m, eta_s))
-        
-        # Resume Check
-        if (file.exists(target_file_path)) {
-          log_msg("Current analysis file already exists, skipping.", target_file_path)
-          start_week <- start_week + 1
-          next
-        }
-        
-        computed_iterations <- computed_iterations + 1
-        
-        window_data <- prepare_window_data(region_df, start_week, window_size)
-        if (is.null(window_data)) {
-          start_week <- start_week + 1
-          next
-        }
-        
-        aligned_data <- compute_distance_matrix(window_data, rad)
-        if (is.null(aligned_data)) {
-          start_week <- start_week + 1
-          next
-        }
-        
-        fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
-        
-        expected_models <- length(config$spatial_models)
-        successful_models <- length(fitted_models)
-        failed_models <- expected_models - successful_models
-        
-        total_models_attempted <- total_models_attempted + expected_models
-        total_models_failed <- total_models_failed + failed_models
-        
-        if (successful_models > 0) {
-          payload <- list(
-            models = fitted_models,
-            window = window_size,
-            start_week = start_week,
-            end_week = end_week,
-            region = region_name,
-            radius = rad,
-            estimation_granularity = estimation_granularity
+      sw <- min_week
+      while ((sw + window_size - 1) <= max_week) {
+        ew <- sw + window_size - 1
+        fname <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS",
+                         gsub("[^A-Za-z0-9]", "_", region_name), rad, sw, ew)
+        target <- file.path(output_dir, fname)
+        if (!file.exists(target)) {
+          tasks[[length(tasks) + 1L]] <- list(
+            region      = region_name,
+            radius      = rad,
+            start_week  = sw,
+            end_week    = ew,
+            target_file = target
           )
-          
-          create_coef_df(payload, target_file_path)
         }
-        
-        rm(window_data, aligned_data, fitted_models, payload)
-        gc(full = TRUE)
-        
-        start_week <- start_week + 1
+        sw <- sw + 1
       }
     }
   }
   
-  cat("\n") 
+  log_msg("Total tasks to run: ", length(tasks))
+  if (length(tasks) == 0) {
+    log_msg("Nothing to do (all outputs already exist).")
+    return(invisible(NULL))
+  }
   
-  fail_rate <- (total_models_failed / max(1, total_models_attempted)) * 100
-  log_msg("=== PIPELINE COMPLETE ===")
-  log_msg(sprintf("Total Models Attempted: %d", total_models_attempted))
-  log_msg(sprintf("Total Models Failed:    %d", total_models_failed))
-  log_msg(sprintf("Failure Rate:           %.2f%%", fail_rate))
+  if (is.null(n_cores)) n_cores <- max(1L, parallel::detectCores() - 1L)
+  n_cores <- min(n_cores, length(tasks))
+  log_msg("Parallelizing with ", n_cores, " workers.")
+  
+  cl <- parallel::makeCluster(n_cores)
+  doParallel::registerDoParallel(cl)
+  on.exit({
+    try(parallel::stopCluster(cl), silent = TRUE)
+    try(foreach::registerDoSEQ(), silent = TRUE)
+  }, add = TRUE)
+  
+  # --------------------------------------------------------------------------
+  # Dispatch
+  # --------------------------------------------------------------------------
+  results <- foreach::foreach(
+    task = tasks,
+    .packages = c("dplyr", "sf", "spdep", "plm", "splm", "tidyverse"),
+    .export   = c("config", "formula", "window_size", "estimation_granularity",
+                  "working_df",
+                  "prepare_window_data", "compute_distance_matrix",
+                  "fit_spatial_models", "create_coef_df"),
+    .errorhandling = "pass"
+  ) %dopar% {
+    
+    # Silence logger on workers to avoid shared-file contention.
+    assign("log_msg", function(...) invisible(NULL), envir = globalenv())
+    
+    tryCatch({
+      region_df <- if (task$region == "Italy") {
+        working_df
+      } else {
+        working_df[working_df[[estimation_granularity]] == task$region, , drop = FALSE]
+      }
+      
+      window_data <- prepare_window_data(region_df, task$start_week, window_size)
+      if (is.null(window_data)) return(list(ok = TRUE, file = NA_character_))
+      
+      aligned_data <- compute_distance_matrix(window_data, task$radius)
+      if (is.null(aligned_data)) return(list(ok = TRUE, file = NA_character_))
+      
+      fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
+      
+      if (length(fitted_models) > 0) {
+        payload <- list(
+          models                 = fitted_models,
+          window                 = window_size,
+          start_week             = task$start_week,
+          end_week               = task$end_week,
+          region                 = task$region,
+          radius                 = task$radius,
+          estimation_granularity = estimation_granularity
+        )
+        create_coef_df(payload, task$target_file)
+        return(list(ok = TRUE, file = task$target_file))
+      }
+      list(ok = TRUE, file = NA_character_)
+    },
+    error = function(e) {
+      list(ok = FALSE, file = task$target_file,
+           msg = paste0(task$region, "|rad=", task$radius,
+                        "|w=", task$start_week, "-", task$end_week,
+                        "|", conditionMessage(e)))
+    })
+  }
+  
+  # --------------------------------------------------------------------------
+  # Summary
+  # --------------------------------------------------------------------------
+  ok_flags <- vapply(results, function(x) isTRUE(x$ok), logical(1))
+  wrote    <- vapply(results, function(x) isTRUE(x$ok) && !is.na(x$file), logical(1))
+  
+  log_msg("=== PARALLEL PIPELINE COMPLETE ===")
+  log_msg(sprintf("Tasks: %d | OK: %d | Errors: %d | New files written: %d",
+                  length(tasks), sum(ok_flags), sum(!ok_flags), sum(wrote)))
+  
+  if (any(!ok_flags)) {
+    log_msg("Errors:")
+    for (x in results[!ok_flags]) log_msg("  - ", x$msg)
+  }
+  
+  invisible(results)
 }
 
 # ------------------------------------------------------------------------------
