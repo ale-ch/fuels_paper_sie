@@ -5,6 +5,11 @@ library(plm)
 library(splm)
 library(spdep)
 library(sf)
+library(tidyverse)
+library(sf)
+library(spdep)
+library(plm)
+library(splm)
 
 source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/utils/create_coefs_df.r")
 
@@ -60,13 +65,11 @@ config <- list(
 # ------------------------------------------------------------------------------
 # 2. MODULAR PIPELINE FUNCTIONS
 # ------------------------------------------------------------------------------
-library(tidyverse)
-library(sf)
-library(spdep)
-library(plm)
-library(splm)
-
 apply_stratified_sampling <- function(df, granularity, sample_fraction, random_seed = 42) {
+  
+  if(granularity == "nuts0") {
+    granularity <- "nuts1"
+  }
   
   set.seed(random_seed)
   if (sample_fraction >= 1.0) return(df)
@@ -184,13 +187,14 @@ fit_spatial_models <- function(df, W, formula, config) {
   return(fitted_models)
 }
 
-
 # ------------------------------------------------------------------------------
 # UPDATED EXECUTION LOOP
 # ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
-                                   estimation_granularity = "nuts2", output_dir,
+                                   estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"), output_dir,
                                    sample_fraction = 1.0, random_seed = 42) {
+  
+  match.arg(estimation_granularity)
   
   set.seed(random_seed)
   setup_logging(output_dir, config)
@@ -233,7 +237,12 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   rm(base_data)
   gc()
   
-  regions <- unique(working_df[[estimation_granularity]])
+  if(estimation_granularity == "nuts0") {
+    regions <- "Italy"
+  } else {
+    regions <- unique(working_df[[estimation_granularity]])
+  }
+  
   min_week <- min(working_df$time_index, na.rm = TRUE)
   max_week <- max(working_df$time_index, na.rm = TRUE)
   
@@ -243,7 +252,11 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     if(is.na(region_name)) next
     log_msg("--- PROCESSING REGION: ", region_name, " ---")
     
-    region_df <- working_df %>% filter(!!sym(estimation_granularity) == region_name)
+    if(region_name == "Italy") {
+      region_df <- working_df
+    } else {
+      region_df <- working_df %>% filter(!!sym(estimation_granularity) == region_name)
+    }
     
     for (rad in radiuses) {
       log_msg("=== RADIUS: ", rad, " meters ===")
@@ -340,20 +353,76 @@ collect_results <- function(directory_path, output_path, pattern = "\\.RDS$") {
 }
 
 
+
+
+# ------------------------------------------------------------------------------
+# EXECUTION
+# ------------------------------------------------------------------------------
+
 # base_data <- readRDS("/Volumes/T7 Shield/FRES/fuels_data/dataset.RDS")
+
+
 base_data_path <- "/Volumes/T7 Shield/FRES/fuels_data/dataset.RDS"
-output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/test2"
+output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
 formula <- mean_price_gasoline_self ~ brent_diff_pos + brent_diff_neg
 radiuses <- c(2500, 5000)
 window_size <- 52
+estimation_granularity <- "nuts1"
 random_seed <- 42
 
+tmstp <- format(Sys.time(), "%Y%m%d_%H%M%S") 
+run_name <- paste("run", estimation_granularity, random_seed, tmstp, sep = "_")
+
+run_dir <- file.path(output_dir, run_name)
+results_file <- file.path(run_dir, paste0("results_", run_name, ".RDS"))
+
+
+if(!dir.exists(run_dir)) {dir.create(run_dir)}
+
 run_rolling_estimation(base_data_path, config, formula, radiuses, window_size, 
-                       estimation_granularity = "nuts1", output_dir,
+                       estimation_granularity = estimation_granularity, run_dir,
                        sample_fraction = 0.05, random_seed)
 
-results <- collect_results(output_dir, output_path)
+results <- collect_results(run_dir, results_file)
 
 
 
+# Define core directories and paths
+#output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/test2"
+#results_rds_path <- file.path(output_dir, "combined_results.RDS")
 
+# Define spatial boundaries paths (Adjust these to match your local file structure)
+shp_path <- "/Volumes/T7 Shield/FRES/fuels_data/spatial/Limiti01012022/Com01012022/Com01012022_WGS84.shp"
+nuts_path <- "/Volumes/T7 Shield/FRES/fuels_data/spatial/nuts_mapping.json"
+#estimation_granularity <- "nuts1" # Must match what was used in the rolling loop
+
+# 1. Collect individual RDS files into a single master dataframe
+cat("Collecting rolling window results...\n")
+#results <- collect_results(directory_path = output_dir, output_path = results_rds_path)
+
+# (Optional) If you have already collected them, skip the line above and just load:
+# results <- readRDS(results_rds_path)
+
+# 2. Generate the aggregated summary statistics dataframe
+cat("Calculating summary statistics...\n")
+summary_stats <- generate_summary_table(results)
+
+# 3. Export compact CSV tables with significance stars for presentation
+cat("Exporting presentation tables...\n")
+export_compact_tables(summary_stats, run_dir)
+
+# 4. Batch generate all plots (Timeseries, Summaries, Sensitivity, and Maps)
+cat("Initiating batch visualization pipeline...\n")
+shp_path        <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
+nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/nuts_data.csv"
+
+generate_all_visualizations(
+  stats_data = results, 
+  summary_stats = summary_stats, 
+  output_dir = run_dir, 
+  shp_path = shp_path, 
+  nuts_path = nuts_path, 
+  estimation_granularity = estimation_granularity
+)
+
+cat("Pipeline completely finished.\n")
