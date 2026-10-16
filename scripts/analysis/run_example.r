@@ -12,3 +12,7 @@ test <- TRUE
 
 
 main(data_dir, output_dir, formula, radiuses, window_size, estimation_granularity, sample_fraction, random_seed, test) 
+
+
+
+R /path/to/main.r --data_dir --output_dir ...

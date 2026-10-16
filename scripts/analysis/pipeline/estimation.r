@@ -222,14 +222,18 @@ fit_spatial_models <- function(df, W, formula, config) {
 # ------------------------------------------------------------------------------
 # UPDATED EXECUTION LOOP
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# UPDATED EXECUTION LOOP
+# ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# UPDATED EXECUTION LOOP WITH OVERALL PROGRESS & ETA
+# ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
                                    estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"), output_dir,
                                    sample_fraction = 1.0, random_seed = 42) {
   
   match.arg(estimation_granularity)
   set.seed(random_seed)
-  
-  # Removed setup_logging() call here as it's now handled by main.r
   
   total_models_attempted <- 0
   total_models_failed <- 0
@@ -277,10 +281,16 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   
   log_msg("Global time_index range: ", min_week, " to ", max_week)
   
-  for (region_name in regions) {
-    if(is.na(region_name)) next
-    log_msg("--- PROCESSING REGION: ", region_name, " ---")
-    
+  # Progress tracking setup
+  valid_regions <- regions[!is.na(regions)]
+  total_windows <- max_week - window_size + 1 - min_week + 1
+  total_iterations <- length(valid_regions) * length(radiuses) * total_windows
+  current_iteration <- 0
+  
+  log_msg("Total expected iterations: ", total_iterations)
+  loop_start_time <- as.numeric(Sys.time())
+  
+  for (region_name in valid_regions) {
     if(region_name == "Italy") {
       region_df <- working_df
     } else {
@@ -288,13 +298,31 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     }
     
     for (rad in radiuses) {
-      log_msg("=== RADIUS: ", rad, " meters ===")
-      
       start_week <- min_week
+      
       while ((start_week + window_size - 1) <= max_week) {
         end_week <- start_week + window_size - 1
-        log_msg("WINDOW [", start_week, " - ", end_week, "]")
+        current_iteration <- current_iteration + 1
         
+        # ETA and Progress Calculation
+        current_time <- as.numeric(Sys.time())
+        elapsed <- current_time - loop_start_time
+        time_per_iter <- elapsed / current_iteration
+        eta_secs <- (total_iterations - current_iteration) * time_per_iter
+        
+        eta_h <- floor(eta_secs / 3600)
+        eta_m <- floor((eta_secs %% 3600) / 60)
+        eta_s <- floor(eta_secs %% 60)
+        
+        pct <- (current_iteration / total_iterations) * 100
+        
+        # Print progress bar with padding to overwrite previous lines completely
+        cat(sprintf("\r[%5.1f%%] Iter: %d/%d | Reg: %-6s | Rad: %-5d | Win: %03d-%03d | ETA: %02d:%02d:%02d          ", 
+                    pct, current_iteration, total_iterations, 
+                    substr(region_name, 1, 6), rad, start_week, end_week, 
+                    eta_h, eta_m, eta_s))
+        
+        # Suppress standard logging inside loop to prevent breaking the carriage return
         window_data <- prepare_window_data(region_df, start_week, window_size)
         if (is.null(window_data)) {
           start_week <- start_week + 1
@@ -316,8 +344,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         total_models_attempted <- total_models_attempted + expected_models
         total_models_failed <- total_models_failed + failed_models
         
-        log_msg("    -> FITS: ", successful_models, "/", expected_models, " models succeeded.")
-        
         if (successful_models > 0) {
           payload <- list(
             models = fitted_models,
@@ -333,7 +359,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
                                gsub("[^A-Za-z0-9]", "_", region_name), 
                                rad, start_week, end_week)
           
-          log_msg("SAVING MODEL DATA TO ", file.path(output_dir, file_name))
           create_coef_df(payload, file.path(output_dir, file_name))
         }
         
@@ -345,13 +370,14 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     }
   }
   
+  cat("\n") # Clear the line after the loop finishes
+  
   fail_rate <- (total_models_failed / max(1, total_models_attempted)) * 100
   log_msg("=== PIPELINE COMPLETE ===")
   log_msg(sprintf("Total Models Attempted: %d", total_models_attempted))
   log_msg(sprintf("Total Models Failed:    %d", total_models_failed))
   log_msg(sprintf("Failure Rate:           %.2f%%", fail_rate))
 }
-
 # ------------------------------------------------------------------------------
 # UPDATED RESULT COLLECTION
 # ------------------------------------------------------------------------------
