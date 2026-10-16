@@ -230,7 +230,7 @@ fit_spatial_models <- function(df, W, formula, config) {
 # ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size,
                                    estimation_granularity = c("nuts0","nuts1","nuts2","nuts3"),
-                                   output_dir, sample_fraction = 1.0, random_seed = 42, cores=1) {
+                                   output_dir, sample_fraction = 1.0, random_seed = 42, cores) {
   
   match.arg(estimation_granularity)
   set.seed(random_seed)
@@ -251,6 +251,18 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   
   worker_log_dir <- file.path(output_dir, "worker_logs")
   dir.create(worker_log_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # --- dump shared state once; workers pull it from disk, not the socket ---
+  worker_cache <- file.path(worker_log_dir, "cache.RDS")
+  saveRDS(list(
+    working_df             = working_df,
+    config                 = config,
+    formula                = formula,
+    window_size            = window_size,
+    estimation_granularity = estimation_granularity,
+    worker_log_dir         = worker_log_dir
+  ), worker_cache)
+  rm(working_df); gc()
   
   # --- build the full expected task list ---
   all_tasks <- list()
@@ -287,15 +299,16 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   foreach::foreach(
     task = tasks,
     .packages = c("dplyr","sf","spdep","plm","splm","tidyverse"),
-    .export   = c("config","formula","window_size","estimation_granularity","working_df",
-                  "worker_log_dir",
-                  "prepare_window_data","compute_distance_matrix",
+    .export   = c("prepare_window_data","compute_distance_matrix",
                   "fit_spatial_models","create_coef_df"),
     .errorhandling = "pass"
   ) %dopar% {
     
-    # --- open this worker's own log once, cache the closure in .GlobalEnv ---
-    if (!isTRUE(get0(".worker_log_ready", envir = globalenv(), inherits = FALSE))) {
+    # --- one-time per-worker bootstrap: log + load cache ---
+    if (!isTRUE(get0(".worker_ready", envir = globalenv(), inherits = FALSE))) {
+      cache <- readRDS(worker_cache)
+      list2env(cache, envir = globalenv())
+      
       conn <- file(file.path(worker_log_dir, sprintf("worker_%d.log", Sys.getpid())),
                    open = "a")
       assign("log_msg", local({
@@ -303,10 +316,9 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         function(...) {
           cat(format(Sys.time(), "%H:%M:%S"), "|", paste0(..., collapse = ""), "\n",
               file = c, sep = "")
-          flush(c)
         }
       }), envir = globalenv())
-      assign(".worker_log_ready", TRUE, envir = globalenv())
+      assign(".worker_ready", TRUE, envir = globalenv())
       log_msg("Worker up. PID=", Sys.getpid())
     }
     
@@ -341,14 +353,13 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   }
   invisible(NULL)
 }
-
 # ------------------------------------------------------------------------------
 # UPDATED RESULT COLLECTION
 # ------------------------------------------------------------------------------
-collect_results <- function(directory_path, output_path, pattern = "\\.RDS$") {
+collect_results <- function(directory_path, output_path, pattern = "^res_.*\\.RDS$") {
   
   file_paths <- list.files(path = directory_path, pattern = pattern, full.names = TRUE)
-  file_paths <- file_paths[!grepl("run_config", file_paths)]
+  file_paths <- file_paths[!grepl("run_config|worker_cache", file_paths)]
   
   if (length(file_paths) == 0) {
     log_msg("WARNING: No result files matching pattern ", pattern, " found in ", directory_path)
