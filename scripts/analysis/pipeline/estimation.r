@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------
-# estimation.r (UPDATED FOR CENTRALIZED LOGGING & STEP SIZE)
+# estimation.r (UPDATED FOR NA PLACEHOLDERS & INTERPOLATION)
 # ------------------------------------------------------------------------------
 library(foreach)
 library(doParallel)
@@ -37,7 +37,24 @@ config <- list(
 # ------------------------------------------------------------------------------
 
 create_coef_df <- function(mod_data, output_path) {
-  c_df_part <- map_dfr(names(mod_data$models), function(m_name) {
+  
+  # Loop over ALL expected models, not just the ones that succeeded
+  c_df_part <- map_dfr(names(config$spatial_models), function(m_name) {
+    
+    # Baseline placeholder for failures
+    base_df <- data.frame(
+      estimate = NA_real_, std_error = NA_real_, t_value = NA_real_, p_value = NA_real_,
+      term = NA_character_, model = m_name,
+      window = mod_data$window, radius_m = mod_data$radius,
+      end_week = mod_data$end_week, region = mod_data$region,
+      estimation_granularity = mod_data$estimation_granularity,
+      date = as.Date("2016-01-01") + (mod_data$start_week - 1) * 7,
+      end_date = as.Date("2016-01-01") + (mod_data$end_week - 1) * 7,
+      stringsAsFactors = FALSE
+    )
+    
+    # If model failed entirely during this window, return the NA placeholder
+    if (!(m_name %in% names(mod_data$models))) return(base_df)
     
     summ <- tryCatch({
       summary(mod_data$models[[m_name]])
@@ -45,18 +62,18 @@ create_coef_df <- function(mod_data, output_path) {
       return(NULL) 
     })
     
-    if (is.null(summ)) return(NULL)
+    if (is.null(summ)) return(base_df)
     
     if ("CoefTable" %in% names(summ)) {
       c_df <- as.data.frame(summ$CoefTable)
     } else if ("coefficients" %in% names(summ)) {
       c_df <- as.data.frame(summ$coefficients)
     } else {
-      return(NULL)
+      return(base_df)
     }
     
     if (nrow(c_df) == 0 || ncol(c_df) < 4) {
-      return(NULL)
+      return(base_df)
     }
     
     c_df <- c_df[, 1:4]
@@ -69,9 +86,8 @@ create_coef_df <- function(mod_data, output_path) {
     c_df$end_week <- mod_data$end_week
     c_df$region <- mod_data$region
     c_df$estimation_granularity <- mod_data$estimation_granularity
-    
-    c_df$date <- as.Date("2016-01-01") + (mod_data$start_week - 1) * 7
-    c_df$end_date <- as.Date("2016-01-01") + (mod_data$end_week - 1) * 7
+    c_df$date <- base_df$date
+    c_df$end_date <- base_df$end_date
     
     return(c_df)
   })
@@ -79,6 +95,8 @@ create_coef_df <- function(mod_data, output_path) {
   rownames(c_df_part) <- NULL
   
   c_df_part$term <- sapply(c_df_part$term, function(x) {
+    if (is.na(x)) return(NA_character_)
+    
     if (x %in% names(config$term_labels)) {
       return(config$term_labels[[x]])
     } else if (grepl("W\\*", x)) { 
@@ -99,10 +117,7 @@ create_coef_df <- function(mod_data, output_path) {
 }
 
 apply_stratified_sampling <- function(df, granularity, sample_fraction, random_seed = 42) {
-  
-  if(granularity == "nuts0") {
-    granularity <- "nuts1"
-  }
+  if(granularity == "nuts0") granularity <- "nuts1"
   
   set.seed(random_seed)
   if (sample_fraction >= 1.0) return(df)
@@ -110,11 +125,8 @@ apply_stratified_sampling <- function(df, granularity, sample_fraction, random_s
   log_msg("Applying stratified sampling (", sample_fraction * 100, "%) at ", granularity, " level.")
   
   sampled_pumps <- df %>%
-    group_by(id_pump) %>%
-    slice(1) %>%
-    ungroup() %>%
-    group_by(!!sym(granularity)) %>%
-    slice_sample(prop = sample_fraction) %>%
+    group_by(id_pump) %>% slice(1) %>% ungroup() %>%
+    group_by(!!sym(granularity)) %>% slice_sample(prop = sample_fraction) %>%
     pull(id_pump)
   
   result_df <- df %>% filter(id_pump %in% sampled_pumps)
@@ -125,38 +137,20 @@ apply_stratified_sampling <- function(df, granularity, sample_fraction, random_s
 
 prepare_window_data <- function(df, start_week, window_size) {
   end_week <- start_week + window_size - 1
-  
   window_df <- df %>% filter(time_index >= start_week, time_index <= end_week)
-  if (nrow(window_df) == 0) {
-    log_msg("    -> SKIP: 0 rows found in time_index range [", start_week, " - ", end_week, "]")
-    return(NULL)
-  }
+  
+  if (nrow(window_df) == 0) return(NULL)
   
   complete_pumps <- window_df %>%
-    filter(
-      complete.cases(mean_price_gasoline_self, latitude, longitude),
-      !is.nan(mean_price_gasoline_self)
-    ) %>%
-    count(id_pump) %>% 
-    filter(n == window_size) %>% 
-    pull(id_pump)
+    filter(complete.cases(mean_price_gasoline_self, latitude, longitude), !is.nan(mean_price_gasoline_self)) %>%
+    count(id_pump) %>% filter(n == window_size) %>% pull(id_pump)
   
-  if (length(complete_pumps) < 10) {
-    log_msg("    -> SKIP: Only ", length(complete_pumps), " strictly balanced stations (need >=10).")
-    return(NULL)
-  }
+  if (length(complete_pumps) < 10) return(NULL)
   
-  window_df <- window_df %>% 
-    filter(id_pump %in% complete_pumps) %>% 
-    st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
-    st_transform(32632)
+  window_df <- window_df %>% filter(id_pump %in% complete_pumps) %>% 
+    st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% st_transform(32632)
+  window_df_unique <- window_df %>% group_by(id_pump) %>% slice(1) %>% ungroup()
   
-  window_df_unique <- window_df %>% 
-    group_by(id_pump) %>% 
-    slice(1) %>% 
-    ungroup()
-  
-  log_msg("    -> SUCCESS: Window balanced with ", length(complete_pumps), " active stations.")
   return(list(df = window_df, df_unique = window_df_unique))
 }
 
@@ -168,15 +162,8 @@ compute_distance_matrix <- function(window_data, radius_m) {
   nb <- dnearneigh(coords, d1 = 0, d2 = radius_m, longlat = FALSE)
   
   isolated <- which(card(nb) == 0)
-  if (length(isolated) > 0) {
-    log_msg("    -> MATRIX: Dropping ", length(isolated), " isolated stations with 0 neighbors.")
-    df_unique <- df_unique[-isolated, ]
-  }
-  
-  if (nrow(df_unique) < 10) {
-    log_msg("    -> SKIP: Matrix too small after dropping isolates (", nrow(df_unique), " remaining).")
-    return(NULL)
-  }
+  if (length(isolated) > 0) df_unique <- df_unique[-isolated, ]
+  if (nrow(df_unique) < 10) return(NULL)
   
   df <- df %>% filter(id_pump %in% df_unique$id_pump) %>% arrange(id_pump, time_index)
   df_unique <- df_unique %>% arrange(id_pump)
@@ -186,8 +173,6 @@ compute_distance_matrix <- function(window_data, radius_m) {
   
   W <- nb2listw(nb, glist = lapply(nbdists(nb, coords), function(x) ifelse(x>0, 1/x, 0)), 
                 style = "W", zero.policy = TRUE)
-  
-  log_msg("    -> SUCCESS: Spatial matrix W created (N = ", nrow(df_unique), ").")
   return(list(df = df, W = W))
 }
 
@@ -197,8 +182,6 @@ fit_spatial_models <- function(df, W, formula, config) {
   
   for (model_name in names(config$spatial_models)) {
     m_conf <- config$spatial_models[[model_name]]
-    log_msg("    -> MODEL: Estimating ", model_name, "...")
-    
     fit <- tryCatch({
       if (m_conf$pkg == "splm") {
         spgm(formula, data = p_data, listw = W, model = "within", method = "w2sls",
@@ -206,21 +189,15 @@ fit_spatial_models <- function(df, W, formula, config) {
       } else {
         plm(formula, data = p_data, model = "within", effect = "individual")
       }
-    }, error = function(e) {
-      log_msg("       [!] FAILED: ", model_name, " | Error: ", e$message)
-      return(NULL)
-    })
+    }, error = function(e) { return(NULL) })
     
-    if (!is.null(fit)) {
-      fitted_models[[model_name]] <- fit
-    }
+    if (!is.null(fit)) fitted_models[[model_name]] <- fit
   }
-  
   return(fitted_models)
 }
 
 # ------------------------------------------------------------------------------
-# UPDATED EXECUTION LOOP WITH OVERALL PROGRESS, ETA & STEP SIZE
+# UPDATED EXECUTION LOOP WITH PLACEHOLDER INJECTION
 # ------------------------------------------------------------------------------
 run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, step_size = 1,
                                    estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"), output_dir,
@@ -236,32 +213,21 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   base_data <- readRDS(base_data_path)
   
   if (!is.numeric(base_data$df$time_index)) {
-    log_msg("WARNING: time_index is not numeric. Forcing conversion to sequential integers.")
-    base_data$df <- base_data$df %>%
-      mutate(time_index = as.integer(factor(time_index, ordered = TRUE)))
+    base_data$df <- base_data$df %>% mutate(time_index = as.integer(factor(time_index, ordered = TRUE)))
   }
   
   working_df <- apply_stratified_sampling(base_data$df, estimation_granularity, sample_fraction, random_seed)
   
   run_config <- list(
-    timestamp = Sys.time(),
-    config_params = config,
-    formula = deparse(formula),
-    radiuses = radiuses,
-    window_size = window_size,
-    step_size = step_size,
-    estimation_granularity = estimation_granularity,
-    sample_fraction = sample_fraction,
-    random_seed = random_seed,
-    sampled_id_pumps = unique(working_df$id_pump)
+    timestamp = Sys.time(), config_params = config, formula = deparse(formula),
+    radiuses = radiuses, window_size = window_size, step_size = step_size,
+    estimation_granularity = estimation_granularity, sample_fraction = sample_fraction,
+    random_seed = random_seed, sampled_id_pumps = unique(working_df$id_pump)
   )
   
-  config_file_name <- paste0("run_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".RDS")
-  config_path <- file.path(output_dir, config_file_name)
+  config_path <- file.path(output_dir, paste0("run_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".RDS"))
   saveRDS(run_config, config_path)
-  log_msg("Run configuration and sampled id_pump list saved to: ", config_path)
   
-  log_msg("CLEARING MEMORY - remove base_data")
   rm(base_data)
   gc()
   
@@ -273,10 +239,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   
   min_week <- min(working_df$time_index, na.rm = TRUE)
   max_week <- max(working_df$time_index, na.rm = TRUE)
-  
-  log_msg("Global time_index range: ", min_week, " to ", max_week)
-  
-  # Progress tracking & sequence generation based on step_size
   valid_regions <- regions[!is.na(regions)]
   start_weeks_seq <- seq(min_week, max_week - window_size + 1, by = step_size)
   
@@ -284,98 +246,79 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   total_iterations <- length(valid_regions) * length(radiuses) * total_windows
   current_iteration <- 0
   computed_iterations <- 0
-  
-  log_msg("Total expected iterations: ", total_iterations)
   loop_start_time <- as.numeric(Sys.time())
   
   for (region_name in valid_regions) {
-    if(region_name == "Italy") {
-      region_df <- working_df
-    } else {
-      region_df <- working_df %>% filter(!!sym(estimation_granularity) == region_name)
-    }
+    region_df <- if(region_name == "Italy") working_df else working_df %>% filter(!!sym(estimation_granularity) == region_name)
     
     for (rad in radiuses) {
-      
       for (start_week in start_weeks_seq) {
         end_week <- start_week + window_size - 1
         current_iteration <- current_iteration + 1
         
-        file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", 
-                             gsub("[^A-Za-z0-9]", "_", region_name), 
-                             rad, start_week, end_week)
+        file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", gsub("[^A-Za-z0-9]", "_", region_name), rad, start_week, end_week)
         target_file_path <- file.path(output_dir, file_name)
         
-        # ETA and Progress Calculation
         pct <- (current_iteration / total_iterations) * 100
-        
         if (computed_iterations > 0) {
-          current_time <- as.numeric(Sys.time())
-          elapsed <- current_time - loop_start_time
-          time_per_iter <- elapsed / computed_iterations
-          eta_secs <- (total_iterations - current_iteration) * time_per_iter
-          
-          eta_h <- floor(eta_secs / 3600)
-          eta_m <- floor((eta_secs %% 3600) / 60)
-          eta_s <- floor(eta_secs %% 60)
-        } else {
-          eta_h <- 0; eta_m <- 0; eta_s <- 0
-        }
+          elapsed <- as.numeric(Sys.time()) - loop_start_time
+          eta_secs <- (total_iterations - current_iteration) * (elapsed / computed_iterations)
+          eta_h <- floor(eta_secs / 3600); eta_m <- floor((eta_secs %% 3600) / 60); eta_s <- floor(eta_secs %% 60)
+        } else { eta_h <- 0; eta_m <- 0; eta_s <- 0 }
         
         cat(sprintf("\r[%5.1f%%] Iter: %d/%d | Reg: %-6s | Rad: %-5d | Win: %03d-%03d | ETA: %02d:%02d:%02d          ", 
-                    pct, current_iteration, total_iterations, 
-                    substr(region_name, 1, 6), rad, start_week, end_week, 
-                    eta_h, eta_m, eta_s))
+                    pct, current_iteration, total_iterations, substr(region_name, 1, 6), rad, start_week, end_week, eta_h, eta_m, eta_s))
         
-        # Resume Check
-        if (file.exists(target_file_path)) {
-          log_msg("Current analysis file already exists, skipping.", target_file_path)
-          next
-        }
-        
+        if (file.exists(target_file_path)) next
         computed_iterations <- computed_iterations + 1
         
-        window_data <- prepare_window_data(region_df, start_week, window_size)
-        if (is.null(window_data)) {
-          next
-        }
-        
-        aligned_data <- compute_distance_matrix(window_data, rad)
-        if (is.null(aligned_data)) {
-          next
-        }
-        
-        fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
-        
-        expected_models <- length(config$spatial_models)
-        successful_models <- length(fitted_models)
-        failed_models <- expected_models - successful_models
-        
-        total_models_attempted <- total_models_attempted + expected_models
-        total_models_failed <- total_models_failed + failed_models
-        
-        if (successful_models > 0) {
-          payload <- list(
-            models = fitted_models,
-            window = window_size,
-            start_week = start_week,
-            end_week = end_week,
-            region = region_name,
-            radius = rad,
-            estimation_granularity = estimation_granularity
-          )
+        tryCatch({
+          window_data <- prepare_window_data(region_df, start_week, window_size)
+          if (is.null(window_data)) stop("Insufficient data points")
           
+          aligned_data <- compute_distance_matrix(window_data, rad)
+          if (is.null(aligned_data)) stop("Spatial matrix failed")
+          
+          fitted_models <- fit_spatial_models(aligned_data$df, aligned_data$W, formula, config)
+          
+          expected_models <- length(config$spatial_models)
+          successful_models <- length(fitted_models)
+          
+          total_models_attempted <<- total_models_attempted + expected_models
+          total_models_failed <<- total_models_failed + (expected_models - successful_models)
+          
+          payload <- list(
+            models = fitted_models, window = window_size, start_week = start_week,
+            end_week = end_week, region = region_name, radius = rad, estimation_granularity = estimation_granularity
+          )
           create_coef_df(payload, target_file_path)
-        }
+          
+        }, error = function(e) {
+          # Log failure to console quietly, update failure counts, and write NA placeholders
+          cat(sprintf("\n    [!] FAILED: Win %03d-%03d (%s) -> %s. Saving NAs.\n", start_week, end_week, region_name, e$message))
+          
+          expected_models <- length(config$spatial_models)
+          total_models_attempted <<- total_models_attempted + expected_models
+          total_models_failed <<- total_models_failed + expected_models
+          
+          payload <- list(
+            models = list(), # Completely empty, forcing create_coef_df to generate NAs
+            window = window_size, start_week = start_week, end_week = end_week,
+            region = region_name, radius = rad, estimation_granularity = estimation_granularity
+          )
+          create_coef_df(payload, target_file_path)
+        })
         
-        rm(window_data, aligned_data, fitted_models, payload)
+        # Clean environment before next iteration
+        env_vars <- ls()
+        to_remove <- intersect(env_vars, c("window_data", "aligned_data", "fitted_models", "payload"))
+        if(length(to_remove) > 0) suppressWarnings(rm(list = to_remove))
         gc(full = TRUE)
       }
     }
   }
   
   cat("\n") 
-  
   fail_rate <- (total_models_failed / max(1, total_models_attempted)) * 100
   log_msg("=== PIPELINE COMPLETE ===")
   log_msg(sprintf("Total Models Attempted: %d", total_models_attempted))
@@ -383,26 +326,14 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   log_msg(sprintf("Failure Rate:           %.2f%%", fail_rate))
 }
 
-# ------------------------------------------------------------------------------
-# UPDATED RESULT COLLECTION
-# ------------------------------------------------------------------------------
 collect_results <- function(directory_path, output_path, pattern = "\\.RDS$") {
-  
   file_paths <- list.files(path = directory_path, pattern = pattern, full.names = TRUE)
   file_paths <- file_paths[!grepl("run_config", file_paths)]
   
-  if (length(file_paths) == 0) {
-    log_msg("WARNING: No result files matching pattern ", pattern, " found in ", directory_path)
-    return(NULL)
-  }
+  if (length(file_paths) == 0) return(NULL)
   
   combined_df <- map_dfr(file_paths, function(file) {
-    tryCatch({
-      readRDS(file)
-    }, error = function(e) {
-      log_msg("WARNING: Failed to read ", file, ": ", e$message)
-      return(NULL)
-    })
+    tryCatch({ readRDS(file) }, error = function(e) { return(NULL) })
   })
   
   saveRDS(combined_df, output_path)
