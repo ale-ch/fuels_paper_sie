@@ -1,4 +1,4 @@
-merge_shp_nuts <- function(nuts_path, shp_path) {
+merge_shp_nuts <- function(nuts_path, shp_path, output_path) {
   nuts_data <- read_delim(nuts_path, delim = ";")
   nuts_data <- nuts_data %>% 
     select(
@@ -28,6 +28,9 @@ merge_shp_nuts <- function(nuts_path, shp_path) {
   
   shp_data$city <- str_replace_all(toupper(shp_data$city), 
                                    c("À" = "A'", "È" = "E'", "É" = "E'", "Ì" = "I'", "Ò" = "O'", "Ù" = "U'"))
+  
+  print(paste("Saving file to:", output_path))
+  saveRDS(shp_data, output_path)
   
   return(shp_data)
 }

@@ -1,152 +1,58 @@
-# ------------------------------------------------------------------------------
-# PIPELINE WRAPPER AND EXECUTION SCRIPT
-# ------------------------------------------------------------------------------
-base_path <- "/Volumes/T7 Shield/FRES/repos/fuels_paper_sie"
-setwd(base_path)
-
-source("scripts/analysis/pipeline/data_preparation.r")
-source("scripts/analysis/pipeline/estimation.r")
-source("scripts/analysis/pipeline/analyze_results.r")
-
-library(tidyverse)
+library(foreach)
+library(doParallel)
+library(dplyr)
+library(plm)
+library(splm)
+library(spdep)
 library(sf)
-library(jsonlite) 
+library(tidyverse)
 
-# --- CENTRAL MODEL CONFIGURATION ---
-pipeline_config <- list(
-  dependent_var = "mean_price_gasoline_self",
-  base_features = c(
-    "population_density_km2", "brent_diff_pos", "brent_diff_neg"
-  ),
-  conditional_features = c("brand_group", "station_type"),
-  term_labels = c(
-    "(Intercept)"                      = "Intercept",
-    "lambda"                           = "Spatial Lag (rho)",
-    "rho"                              = "Spatial Lag (rho)"
-  ),
-  spatial_models = list(
-    SLX   = list(pkg = "plm",  lag = FALSE, spatial.error = FALSE, Durbin = TRUE),
-    SEM   = list(pkg = "splm", lag = FALSE, spatial.error = TRUE,  Durbin = FALSE),
-    SDEM  = list(pkg = "splm", lag = FALSE, spatial.error = TRUE,  Durbin = TRUE),
-    SAR   = list(pkg = "splm", lag = TRUE,  spatial.error = FALSE, Durbin = FALSE),
-    SDM   = list(pkg = "splm", lag = TRUE,  spatial.error = FALSE, Durbin = TRUE),
-    SARAR = list(pkg = "splm", lag = TRUE,  spatial.error = TRUE,  Durbin = FALSE),
-    GNS   = list(pkg = "splm", lag = TRUE,  spatial.error = TRUE,  Durbin = TRUE)
-  )
-)
+# Source logger FIRST
+source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/utils/logger.r")
 
-run_sensitivity_pipeline <- function(rdata_dir, stations_csv, pop_dir, shp_path, nuts_path, mappings_dir, output_dir, 
-                                     config, window_weeks = 52, radiuses_m = c(10000, 20000, 30000), 
-                                     scope_level = "all", scope_name = NULL, estimation_granularity = "nuts1",
-                                     start_week = NULL, end_week = NULL,
-                                     min_stations = 30, sample_fraction = 0.10, test = FALSE, seed = 42) {
+# Source remaining scripts
+source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/utils/merge_shp_nuts.r")
+source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/analysis/pipeline/estimation.r")
+source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/analysis/pipeline/analyze_results.r")
+source("/Volumes/T7 Shield/FRES/repos/fuels_paper_sie/scripts/analysis/pipeline/setup_pipeline.r")
+
+# ------------------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------------------
+main <- function(data_dir, output_dir, formula, radiuses, window_size, estimation_granularity, sample_fraction=1.0, random_seed, test=FALSE) {
   
-  set.seed(seed)
+  setup <- setup_pipeline(data_dir, output_dir, estimation_granularity, random_seed, test)
   
-  # --- 1. VALIDATION & SETUP BLOCK ---
-  valid_levels <- c("all", "nuts1", "nuts2", "nuts3")
-  if (!scope_level %in% valid_levels) stop("Error: scope_level must be 'all', 'nuts1', 'nuts2', or 'nuts3'.")
-  if (scope_level != "all" && is.null(scope_name)) stop(sprintf("Error: You selected scope level '%s' but did not provide a scope_name.", scope_level))
-  if (!estimation_granularity %in% c("nuts1", "nuts2", "nuts3")) stop("Error: estimation_granularity must be 'nuts1', 'nuts2', or 'nuts3'.")
+  run_dir <- setup$run_dir
+  base_data_path <- setup$base_data_path 
+  geo_data_path <- setup$geo_data_path
+  results_file_path <- setup$results_file_path
   
-  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  # Initialize centralized logging for the entire run
+  setup_logging(run_dir, config)
   
-  # --- 1. DATA PREPARATION (Run Once) ---
-  cat("\n=== PHASE 1: Data Preparation & Stratified Sampling ===\n")
-  base_data <- prepare_integrated_panel(
-    rdata_dir = rdata_dir, stations_list_file = stations_csv, pop_dir = pop_dir, shp_path = shp_path,
-    mappings_dir = mappings_dir, nuts_path = nuts_path, min_stations = min_stations,
-    sample_fraction = sample_fraction, test = test, scope_level = scope_level, scope_name = scope_name, seed = seed
+  log_msg("Starting estimation phase...")
+  run_rolling_estimation(base_data_path, config, formula, radiuses, window_size, 
+                         estimation_granularity, run_dir,
+                         sample_fraction, random_seed)
+  
+  log_msg("Collecting rolling window results...")
+  results <- collect_results(run_dir, results_file_path)
+  
+  log_msg("Calculating summary statistics...")
+  summary_stats <- generate_summary_table(results)
+  
+  log_msg("Exporting presentation tables...")
+  export_compact_tables(summary_stats, run_dir)
+  
+  log_msg("Initiating batch visualization pipeline...")
+  generate_all_visualizations(
+    stats_data = results, 
+    summary_stats = summary_stats, 
+    output_dir = run_dir, 
+    geo_data_path = geo_data_path, # Passed to internal functions requiring shp_path
+    estimation_granularity = estimation_granularity
   )
   
-  if (!is.null(start_week) && !is.null(end_week)) {
-    cat(sprintf("Filtering data for timeframe: %s to %s\n", start_week, end_week))
-    base_data$df <- base_data$df %>% filter(time_index >= start_week & time_index <= end_week)
-  }
-  
-  saveRDS(base_data$df, file.path(output_dir, "sampled_panel_data.RDS"))
-  st_write(base_data$stations_sf, file.path(output_dir, "sampled_stations.gpkg"), append = FALSE, quiet = TRUE)
-  
-  run_metadata <- list(
-    model_config = config,
-    execution_params = list(window_weeks = window_weeks, radiuses_m = radiuses_m, min_stations = min_stations,
-                            sample_fraction = sample_fraction, test_mode = test, random_seed = seed,
-                            scope_level = scope_level, scope_name = scope_name, 
-                            estimation_granularity = estimation_granularity, start_week = start_week, end_week = end_week)
-  )
-  saveRDS(run_metadata, file.path(output_dir, "run_metadata.RDS"))
-  write_json(run_metadata, file.path(output_dir, "run_metadata.json"), pretty = TRUE, auto_unbox = TRUE)
-  
-  master_stats <- list()
-  
-  # --- 2. RADIUS LOOP ---
-  for (rad in radiuses_m) {
-    cat(sprintf("\n=== PHASE 2: Processing Radius: %d m ===\n", rad))
-    rad_dir <- file.path(output_dir, paste0("Radius_", rad))
-    if (!dir.exists(rad_dir)) dir.create(rad_dir, recursive = TRUE)
-    
-    # Estimation
-    rolling_output <- run_rolling_panel_models(
-      base_data = base_data, config = config, output_dir = rad_dir, window_size = window_weeks,
-      radius_m = rad, estimation_granularity = estimation_granularity, seed = seed
-    )
-    saveRDS(rolling_output, file.path(rad_dir, "rolling_models_metadata.RDS"))
-    
-    # Analysis & Visualizations per Radius
-    parts_dir <- file.path(rad_dir, "model_parts")
-    stats_data <- analyze_standalone_results(parts_dir, config = config, is_split = TRUE)
-    summary_stats <- generate_summary_table(stats_data)
-    
-    summary_stats$radius <- rad
-    master_stats[[as.character(rad)]] <- summary_stats
-    
-    export_compact_tables(summary_stats, rad_dir)
-    generate_all_visualizations(
-      stats_data = stats_data, summary_stats = summary_stats, output_dir = rad_dir, 
-      shp_path = shp_path, nuts_path = nuts_path, estimation_granularity = estimation_granularity
-    )
-  }
-  
-  # --- 3. SENSITIVITY AGGREGATION ---
-  cat("\n=== PHASE 3: Sensitivity Aggregation ===\n")
-  all_radiuses_df <- bind_rows(master_stats)
-  write_csv(all_radiuses_df, file.path(output_dir, "master_sensitivity_stats.csv"))
-  
-  plot_radius_sensitivity(all_radiuses_df, output_dir)
-  
-  cat("\nPipeline Execution Complete! Outputs saved to:", output_dir, "\n")
-  return(all_radiuses_df)
+  log_msg("Pipeline completely finished.")
 }
-
-# ------------------------------------------------------------------------------
-# EXECUTION BLOCK 
-# ------------------------------------------------------------------------------
-rdata_dir       <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly"
-stations_csv    <- "/Volumes/T7 Shield/FRES/fuels_data/stations_data/stations_list.csv"
-pop_dir         <- "/Volumes/T7 Shield/FRES/fuels_data/population"
-shp_path        <- "/Volumes/T7 Shield/FRES/fuels_data/city_geom/Limiti01012026_g/Com01012026_g/Com01012026_g_WGS84.shp"
-nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/reportspooljson.json"
-# nuts_path       <- "/Volumes/T7 Shield/FRES/fuels_data/nuts_data.csv"
-mappings_dir    <- "/Volumes/T7 Shield/FRES/fuels_data/output_rdata/weekly" 
-base_output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results"
-
-# Parameters
-window_weeks <- 52 
-radiuses_to_test <- c(15000) # Define radiuses here
-min_stations <- 30; sample_fraction <- 0.05
-test_mode <- FALSE; random_seed <- 42
-scope_level <- "nuts2"; scope_name <- c("Lombardia"); estimation_granularity <- "nuts2"
-start_week <- "2022-01"; end_week <- "2023-52"
-
-timestamp_str <- format(Sys.time(), "%Y%m%d%H%M")
-region_prefix <- ifelse(scope_level == "all", "All_Regions", scope_name)
-run_output_dir <- file.path(base_output_dir, paste0("Sensitivity_", region_prefix, "_", timestamp_str))
-
-# Run Pipeline
-sensitivity_results <- run_sensitivity_pipeline(
-  rdata_dir = rdata_dir, stations_csv = stations_csv, pop_dir = pop_dir, shp_path = shp_path,
-  nuts_path = nuts_path, mappings_dir = mappings_dir, output_dir = run_output_dir, config = pipeline_config,
-  window_weeks = window_weeks, radiuses_m = radiuses_to_test, scope_level = scope_level, scope_name = scope_name,
-  estimation_granularity = estimation_granularity, start_week = start_week, end_week = end_week, 
-  min_stations = min_stations, sample_fraction = sample_fraction, test = test_mode, seed = random_seed
-)
