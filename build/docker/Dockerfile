@@ -7,6 +7,7 @@ FROM --platform=linux/amd64 rocker/geospatial:4.5.1
 COPY requirements.csv /tmp/requirements.csv
 
 RUN Rscript -e " \
+  install.packages(c('remotes', 'optparse')); \
   if (!requireNamespace('remotes', quietly = TRUE)) install.packages('remotes'); \
   reqs <- read.csv('/tmp/requirements.csv'); \
   for(i in 1:nrow(reqs)) { \
