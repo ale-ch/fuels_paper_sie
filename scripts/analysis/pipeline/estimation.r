@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------
-# estimation.r (UPDATED FOR CENTRALIZED LOGGING)
+# estimation.r (UPDATED FOR CENTRALIZED LOGGING & STEP SIZE)
 # ------------------------------------------------------------------------------
 library(foreach)
 library(doParallel)
@@ -220,15 +220,9 @@ fit_spatial_models <- function(df, W, formula, config) {
 }
 
 # ------------------------------------------------------------------------------
-# UPDATED EXECUTION LOOP
+# UPDATED EXECUTION LOOP WITH OVERALL PROGRESS, ETA & STEP SIZE
 # ------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------
-# UPDATED EXECUTION LOOP
-# ------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------
-# UPDATED EXECUTION LOOP WITH OVERALL PROGRESS & ETA
-# ------------------------------------------------------------------------------
-run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, 
+run_rolling_estimation <- function(base_data_path, config, formula, radiuses, window_size, step_size = 1,
                                    estimation_granularity = c("nuts0", "nuts1", "nuts2", "nuts3"), output_dir,
                                    sample_fraction = 1.0, random_seed = 42) {
   
@@ -255,6 +249,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     formula = deparse(formula),
     radiuses = radiuses,
     window_size = window_size,
+    step_size = step_size,
     estimation_granularity = estimation_granularity,
     sample_fraction = sample_fraction,
     random_seed = random_seed,
@@ -281,9 +276,11 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   
   log_msg("Global time_index range: ", min_week, " to ", max_week)
   
-  # Progress tracking setup
+  # Progress tracking & sequence generation based on step_size
   valid_regions <- regions[!is.na(regions)]
-  total_windows <- max_week - window_size + 1 - min_week + 1
+  start_weeks_seq <- seq(min_week, max_week - window_size + 1, by = step_size)
+  
+  total_windows <- length(start_weeks_seq)
   total_iterations <- length(valid_regions) * length(radiuses) * total_windows
   current_iteration <- 0
   computed_iterations <- 0
@@ -299,9 +296,8 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     }
     
     for (rad in radiuses) {
-      start_week <- min_week
       
-      while ((start_week + window_size - 1) <= max_week) {
+      for (start_week in start_weeks_seq) {
         end_week <- start_week + window_size - 1
         current_iteration <- current_iteration + 1
         
@@ -334,7 +330,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         # Resume Check
         if (file.exists(target_file_path)) {
           log_msg("Current analysis file already exists, skipping.", target_file_path)
-          start_week <- start_week + 1
           next
         }
         
@@ -342,13 +337,11 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         
         window_data <- prepare_window_data(region_df, start_week, window_size)
         if (is.null(window_data)) {
-          start_week <- start_week + 1
           next
         }
         
         aligned_data <- compute_distance_matrix(window_data, rad)
         if (is.null(aligned_data)) {
-          start_week <- start_week + 1
           next
         }
         
@@ -377,8 +370,6 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         
         rm(window_data, aligned_data, fitted_models, payload)
         gc(full = TRUE)
-        
-        start_week <- start_week + 1
       }
     }
   }
