@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # setup_pipeline.r (UPDATED FOR CENTRALIZED LOGGING)
 # ------------------------------------------------------------------------------
-setup_pipeline <- function(data_dir, output_dir, estimation_granularity, random_seed, test = FALSE) {
+setup_pipeline <- function(data_dir, output_dir, estimation_granularity, random_seed, test = FALSE, run_dir = NULL) {
   
   log_msg("Initializing pipeline setup...")
   
@@ -16,7 +16,18 @@ setup_pipeline <- function(data_dir, output_dir, estimation_granularity, random_
   tmstp <- format(Sys.time(), "%Y%m%d_%H%M%S") 
   run_name <- paste("run", estimation_granularity, random_seed, tmstp, sep = "_")
   
-  run_dir <- file.path(output_dir, run_name)
+  if(!is.null(run_dir) && !dir.exists(run_dir)) {
+    stop("Specified run directory does not exist: ", run_dir)
+  }
+  
+  if(!is.null(run_dir) && dir.exists(run_dir)) {
+    log_msg("Running pipeline in specified directory: ", run_dir)
+  }
+  
+  if(is.null(run_dir)) {
+    run_dir <- file.path(output_dir, run_name)
+  }
+  
   results_file_path <- file.path(run_dir, paste0("results_", run_name, ".RDS"))
   
   if(!dir.exists(run_dir)) {

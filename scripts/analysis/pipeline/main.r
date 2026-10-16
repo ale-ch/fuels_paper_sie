@@ -13,7 +13,8 @@ option_list = list(
   make_option(c("--random_seed"), type="integer", default=42, help="Random seed"),
   make_option(c("--sample_fraction"), type="double", default=0.05, help="Sample fraction"),
   make_option(c("--test"), action="store_true", default=FALSE, help="Boolean flag for test mode"),
-  make_option(c("--verbose"), type="logical", default=TRUE, help="Print logs to console (TRUE/FALSE)")
+  make_option(c("--verbose"), type="logical", default=TRUE, help="Print logs to console (TRUE/FALSE)"),
+  make_option(c("--run_dir"),  type="character", default=NULL, help="Path to existing run directory")
 )
 
 opt_parser = OptionParser(option_list=option_list)
@@ -49,9 +50,9 @@ source("scripts/analysis/pipeline/setup_pipeline.r")
 # ------------------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------------------
-main <- function(data_dir, output_dir, formula, radiuses, window_size, estimation_granularity, sample_fraction=1.0, random_seed, test=FALSE, verbose) {
+main <- function(data_dir, output_dir, formula, radiuses, window_size, estimation_granularity, sample_fraction=1.0, random_seed, test=FALSE, verbose, run_dir) {
   
-  setup <- setup_pipeline(data_dir, output_dir, estimation_granularity, random_seed, test)
+  setup <- setup_pipeline(data_dir, output_dir, estimation_granularity, random_seed, test, run_dir)
   
   run_dir <- setup$run_dir
   base_data_path <- setup$base_data_path 
@@ -99,5 +100,6 @@ main(
   sample_fraction = opt$sample_fraction,
   random_seed = opt$random_seed,
   test = opt$test,
-  verbose = opt$verbose
+  verbose = opt$verbose,
+  run_dir = opt$run_dir
 )

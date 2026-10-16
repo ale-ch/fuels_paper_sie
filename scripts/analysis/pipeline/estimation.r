@@ -286,6 +286,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   total_windows <- max_week - window_size + 1 - min_week + 1
   total_iterations <- length(valid_regions) * length(radiuses) * total_windows
   current_iteration <- 0
+  computed_iterations <- 0
   
   log_msg("Total expected iterations: ", total_iterations)
   loop_start_time <- as.numeric(Sys.time())
@@ -304,25 +305,41 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         end_week <- start_week + window_size - 1
         current_iteration <- current_iteration + 1
         
+        file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", 
+                             gsub("[^A-Za-z0-9]", "_", region_name), 
+                             rad, start_week, end_week)
+        target_file_path <- file.path(output_dir, file_name)
+        
         # ETA and Progress Calculation
-        current_time <- as.numeric(Sys.time())
-        elapsed <- current_time - loop_start_time
-        time_per_iter <- elapsed / current_iteration
-        eta_secs <- (total_iterations - current_iteration) * time_per_iter
-        
-        eta_h <- floor(eta_secs / 3600)
-        eta_m <- floor((eta_secs %% 3600) / 60)
-        eta_s <- floor(eta_secs %% 60)
-        
         pct <- (current_iteration / total_iterations) * 100
         
-        # Print progress bar with padding to overwrite previous lines completely
+        if (computed_iterations > 0) {
+          current_time <- as.numeric(Sys.time())
+          elapsed <- current_time - loop_start_time
+          time_per_iter <- elapsed / computed_iterations
+          eta_secs <- (total_iterations - current_iteration) * time_per_iter
+          
+          eta_h <- floor(eta_secs / 3600)
+          eta_m <- floor((eta_secs %% 3600) / 60)
+          eta_s <- floor(eta_secs %% 60)
+        } else {
+          eta_h <- 0; eta_m <- 0; eta_s <- 0
+        }
+        
         cat(sprintf("\r[%5.1f%%] Iter: %d/%d | Reg: %-6s | Rad: %-5d | Win: %03d-%03d | ETA: %02d:%02d:%02d          ", 
                     pct, current_iteration, total_iterations, 
                     substr(region_name, 1, 6), rad, start_week, end_week, 
                     eta_h, eta_m, eta_s))
         
-        # Suppress standard logging inside loop to prevent breaking the carriage return
+        # Resume Check
+        if (file.exists(target_file_path)) {
+          log_msg("Current analysis file already exists, skipping.", target_file_path)
+          start_week <- start_week + 1
+          next
+        }
+        
+        computed_iterations <- computed_iterations + 1
+        
         window_data <- prepare_window_data(region_df, start_week, window_size)
         if (is.null(window_data)) {
           start_week <- start_week + 1
@@ -355,11 +372,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
             estimation_granularity = estimation_granularity
           )
           
-          file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", 
-                               gsub("[^A-Za-z0-9]", "_", region_name), 
-                               rad, start_week, end_week)
-          
-          create_coef_df(payload, file.path(output_dir, file_name))
+          create_coef_df(payload, target_file_path)
         }
         
         rm(window_data, aligned_data, fitted_models, payload)
@@ -370,7 +383,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
     }
   }
   
-  cat("\n") # Clear the line after the loop finishes
+  cat("\n") 
   
   fail_rate <- (total_models_failed / max(1, total_models_attempted)) * 100
   log_msg("=== PIPELINE COMPLETE ===")
@@ -378,6 +391,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
   log_msg(sprintf("Total Models Failed:    %d", total_models_failed))
   log_msg(sprintf("Failure Rate:           %.2f%%", fail_rate))
 }
+
 # ------------------------------------------------------------------------------
 # UPDATED RESULT COLLECTION
 # ------------------------------------------------------------------------------
