@@ -9,14 +9,13 @@ option_list = list(
   make_option(c("--formula"), type="character", default="mean_price_gasoline_self ~ brent_diff_pos + brent_diff_neg", help="Model formula as a string"),
   make_option(c("--radiuses"), type="character", default="2500,5000", help="Comma-separated radiuses"),
   make_option(c("--window_size"), type="integer", default=52, help="Window size"),
+  make_option(c("--step_size"), type="integer", default=1, help="Rolling window step size (stride)"),
   make_option(c("--estimation_granularity"), type="character", default="nuts1", help="Estimation granularity"),
   make_option(c("--random_seed"), type="integer", default=42, help="Random seed"),
   make_option(c("--sample_fraction"), type="double", default=0.05, help="Sample fraction"),
   make_option(c("--test"), action="store_true", default=FALSE, help="Boolean flag for test mode"),
   make_option(c("--verbose"), type="logical", default=TRUE, help="Print logs to console (TRUE/FALSE)"),
-  make_option(c("--run_dir"),  type="character", default=NULL, help="Path to existing run directory"),
-  make_option(c("--cores"), type="integer", default=NULL,
-              help="Parallel workers (default: detectCores()-1)")
+  make_option(c("--run_dir"),  type="character", default=NULL, help="Path to existing run directory")
 )
 
 opt_parser = OptionParser(option_list=option_list)
@@ -52,11 +51,7 @@ source("scripts/analysis/pipeline/setup_pipeline.r")
 # ------------------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------------------
-main <- function(
-    data_dir, output_dir, formula, radiuses, 
-    window_size, estimation_granularity, 
-    sample_fraction=1.0, random_seed, test=FALSE, 
-    verbose, run_dir, cores) {
+main <- function(data_dir, output_dir, formula, radiuses, window_size, step_size, estimation_granularity, sample_fraction=1.0, random_seed, test=FALSE, verbose, run_dir) {
   
   setup <- setup_pipeline(data_dir, output_dir, estimation_granularity, random_seed, test, run_dir)
   
@@ -69,10 +64,9 @@ main <- function(
   setup_logging(output_dir = output_dir, verbose = verbose)
   
   log_msg("Starting estimation phase...")
-  run_rolling_estimation(base_data_path, config, formula, radiuses, window_size, 
+  run_rolling_estimation(base_data_path, config, formula, radiuses, window_size, step_size, 
                          estimation_granularity, run_dir,
-                         sample_fraction, random_seed,
-                         cores = opt$cores)
+                         sample_fraction, random_seed)
   
   log_msg("Collecting rolling window results...")
   results <- collect_results(run_dir, results_file_path)
@@ -95,19 +89,17 @@ main <- function(
   log_msg("Pipeline completely finished.")
 }
 
-
-
 main(
   data_dir = opt$data_dir,
   output_dir = opt$output_dir,
   formula = model_formula,
   radiuses = model_radiuses,
   window_size = opt$window_size,
+  step_size = opt$step_size,
   estimation_granularity = opt$estimation_granularity,
   sample_fraction = opt$sample_fraction,
   random_seed = opt$random_seed,
   test = opt$test,
   verbose = opt$verbose,
-  run_dir = opt$run_dir,
-  cores = opt$cores
+  run_dir = opt$run_dir
 )
