@@ -1,5 +1,11 @@
 library(tidyverse)
 
+# 1. Load data and compute impacts
+data_path <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/results_run_nuts3_42_20261016_214911.RDS"
+output_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation_tables"
+
+res_df <- readRDS(data_path)
+
 # 1. Isolate parameters
 lambda_df <- res_df %>%
   filter(term == "Spatial Lag (lambda)") %>%
@@ -19,10 +25,13 @@ summary_stats <- lambda_df %>%
     median_lambda     = median(lambda[abs(lambda) < 1.0], na.rm = TRUE),
     median_multiplier = median(1 / (1 - lambda[abs(lambda) < 1.0]), na.rm = TRUE),
     iqr_multiplier    = IQR(1 / (1 - lambda[abs(lambda) < 1.0]), na.rm = TRUE)
-  )
+  ) %>% 
+  mutate(across(is.numeric, round, 1))
 
 print("--- SUMMARY DIAGNOSTICS TABLE ---")
 print(summary_stats)
+write_csv(summary_stats, file.path(output_dir, "models_diagnostics.csv"))
+
 
 # 3. Compute Rockets & Feathers Asymmetry Share
 asym_stats <- brent_df %>%
@@ -45,3 +54,4 @@ asym_stats <- brent_df %>%
 
 print("--- ASYMMETRY SHARE (%) ---")
 print(asym_stats)
+write_csv(asym_stats, file.path(output_dir, "asymmetry_stats.csv"))

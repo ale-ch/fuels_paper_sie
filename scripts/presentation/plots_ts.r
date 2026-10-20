@@ -186,3 +186,70 @@ walk(unique_terms, function(t) {
 })
 
 cat("Conference-ready time series plots successfully generated in:", ts_out_dir, "\n")
+
+
+
+
+
+#### BRENT DIFF RAW MAGNITUDE ####
+
+
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+
+res_df <- readRDS(data_path)
+
+# 1. Filter, aggregate, and calculate absolute value for the negative term
+plot_df <- res_df %>%
+  filter(
+    model == "SAR",
+    term %in% c("brent_diff_pos", "brent_diff_neg")
+  ) %>%
+  group_by(end_date, term) %>%
+  summarize(estimate = mean(estimate, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    end_date = as.Date(end_date),
+    # Take the absolute value here so both lines are directly comparable
+    plot_estimate = abs(estimate),
+    term_label = factor(
+      term,
+      levels = c("brent_diff_pos", "brent_diff_neg"),
+      labels = c("Brent (+) Magnitude", "Brent (-) Magnitude")
+    )
+  )
+
+# 2. Build the comparison plot
+p_asymmetry <- ggplot(plot_df, aes(x = end_date, y = plot_estimate, color = term_label, group = term_label)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.6) +
+  geom_line(linewidth = 0.9, alpha = 0.95) +
+  scale_color_manual(
+    name = "Pass-Through Magnitude",
+    values = c(
+      "Brent (+) Magnitude" = "#D9383A", # Red for upward price pressure
+      "Brent (-) Magnitude" = "#2B7BB9"  # Blue for downward price pressure
+    )
+  ) +
+  scale_x_date(
+    date_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  labs(
+    title = "Rockets and Feathers: Magnitude of Pass-Through",
+    subtitle = "Comparing absolute responses to positive vs. negative Brent shocks (SAR)",
+    x = "Rolling Window End Date",
+    y = "Absolute Coefficient Magnitude (|β|)",
+    caption = "Rolling Window: 52 | Spatial Radius: 15000 meters | Base Granularity: NUTS3"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5, margin = margin(b = 4)),
+    plot.subtitle = element_text(color = "grey40", size = 13, hjust = 0.5, margin = margin(b = 15)),
+    plot.caption = element_text(face = "italic", color = "grey40", size = 10, hjust = 1, margin = margin(t = 15)),
+    axis.title.x = element_text(face = "bold", size = 13, margin = margin(t = 10)),
+    axis.title.y = element_text(face = "bold", size = 13, margin = margin(r = 10)),
+    legend.position = "right",
+    legend.title = element_text(face = "bold", size = 12)
+  )
+
+ggsave(filename = "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation/timeseries_by_model/SAR/NUTS0/ts_N0_asymmetry_gap_SAR.png", plot = p_asymmetry, width = 11, height = 6.5, dpi = 300)
