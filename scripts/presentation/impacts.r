@@ -28,6 +28,12 @@ impacts_df <- brent_df %>%
   ) %>%
   filter(!is.na(Total_Impact))
 
+mult_df <- impacts_df %>%
+  filter(model %in% c("GNS", "SAR", "SARAR", "SDM"), term == "brent_diff_pos") %>%
+  mutate(multiplier = 1 / (1 - lambda)) %>%
+  group_by(model, end_date) %>%
+  summarize(mean_mult = median(multiplier, na.rm = TRUE), .groups = "drop")
+
 # Aggregate across NUTS-3 provinces by date, model, and term
 nat_impacts <- impacts_df %>%
   group_by(model, term, end_date) %>%
@@ -38,6 +44,17 @@ nat_impacts <- impacts_df %>%
     sig_share = mean(Total_pval < 0.05, na.rm = TRUE),
     .groups = "drop"
   )
+
+
+
+mult_df2 <- res_df %>%
+  filter(model %in% c("GNS", "SAR", "SARAR", "SDM"), term == "Spatial Lag (lambda)", !is.na(term), abs(estimate) < 0.99) %>%
+  select(model, end_date, region, end_week, radius_m, lambda = estimate, lambda_se = std_error, lambda_p = p_value) %>% 
+  mutate(
+    multiplier = abs(1 / (1 - lambda))
+  ) %>%
+  group_by(model, end_date) %>%
+  summarize(mean_mult = median(multiplier, na.rm = TRUE), .groups = "drop")
 
 # ------------------------------------------------------------------------------
 # PLOT 1: Direct vs. Indirect vs. Total Impact Decomposition (Target Model: SAR)
@@ -157,12 +174,6 @@ ggsave("plot3_asymmetry_gap.png", p3, width = 10, height = 5, dpi = 300)
 # ------------------------------------------------------------------------------
 # PLOT 4: Spatial Multiplier Amplification Factor (1 / (1 - lambda)) Over Time
 # ------------------------------------------------------------------------------
-mult_df <- impacts_df %>%
-  filter(model %in% c("GNS", "SAR", "SARAR", "SDM"), term == "brent_diff_pos") %>%
-  mutate(multiplier = 1 / (1 - lambda)) %>%
-  group_by(model, end_date) %>%
-  summarize(mean_mult = median(multiplier, na.rm = TRUE), .groups = "drop")
-
 p4 <- ggplot(mult_df, aes(x = end_date, y = mean_mult, color = model)) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
   geom_line(linewidth = 0.8) +
@@ -177,3 +188,20 @@ p4 <- ggplot(mult_df, aes(x = end_date, y = mean_mult, color = model)) +
   theme(plot.title = element_text(face = "bold", color = "#002B52"))
 
 ggsave("plot4_spatial_multiplier.png", p4, width = 10, height = 5, dpi = 300)
+
+
+
+p5 <- ggplot(mult_df2 %>% filter(model == "SAR"), aes(x = end_date, y = mean_mult)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black") +
+  geom_line(linewidth = 0.8) +
+  labs(
+    title = "Spatial Network Amplification Factor: 1 / (1 - lambda)",
+    subtitle = "Median Amplification of National Shocks via Local Competition (NUTS 0, SAR)",
+    x = "Rolling Window End Date",
+    y = "Spatial Multiplier"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", color = "#002B52"))
+
+ggsave("plot4_spatial_multiplier_SAR.png", p5, width = 10, height = 5, dpi = 300)
+

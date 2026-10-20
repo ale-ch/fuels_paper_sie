@@ -20,13 +20,16 @@ summary_stats <- lambda_df %>%
   group_by(model) %>%
   summarize(
     total_windows     = n(),
+    median_lambda     = median(lambda[abs(lambda) < 1.0], na.rm = TRUE),
+    sd_lambda         = sd(lambda[abs(lambda) < 1.0], na.rm = TRUE),
     pct_stable        = mean(abs(lambda) < 1.0, na.rm = TRUE) * 100,
     pct_sig_lambda    = mean(lambda_p < 0.05, na.rm = TRUE) * 100,
-    median_lambda     = median(lambda[abs(lambda) < 1.0], na.rm = TRUE),
     median_multiplier = median(1 / (1 - lambda[abs(lambda) < 1.0]), na.rm = TRUE),
-    iqr_multiplier    = IQR(1 / (1 - lambda[abs(lambda) < 1.0]), na.rm = TRUE)
-  ) %>% 
-  mutate(across(is.numeric, round, 1))
+    iqr_multiplier    = IQR(1 / (1 - lambda[abs(lambda) < 1.0]), na.rm = TRUE),
+    median_lambda_all     = median(abs(lambda), na.rm = TRUE),
+    sd_lambda_all         = sd(abs(lambda), na.rm = TRUE)
+  ) # %>% 
+  # mutate(across(is.numeric, round, 1))
 
 print("--- SUMMARY DIAGNOSTICS TABLE ---")
 print(summary_stats)
