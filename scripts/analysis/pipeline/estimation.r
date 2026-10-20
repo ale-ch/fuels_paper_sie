@@ -257,7 +257,9 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         current_iteration <- current_iteration + 1
         
         file_name <- sprintf("res_%s_rad%d_w%03d_w%03d.RDS", gsub("[^A-Za-z0-9]", "_", region_name), rad, start_week, end_week)
+        file_name_model <- sprintf("model_%s_rad%d_w%03d_w%03d.RDS", gsub("[^A-Za-z0-9]", "_", region_name), rad, start_week, end_week)
         target_file_path <- file.path(output_dir, file_name)
+        model_file_path <- file.path(output_dir, file_name)
         
         pct <- (current_iteration / total_iterations) * 100
         if (computed_iterations > 0) {
@@ -269,7 +271,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
         cat(sprintf("\r[%5.1f%%] Iter: %d/%d | Reg: %-6s | Rad: %-5d | Win: %03d-%03d | ETA: %02d:%02d:%02d          ", 
                     pct, current_iteration, total_iterations, substr(region_name, 1, 6), rad, start_week, end_week, eta_h, eta_m, eta_s))
         
-        if (file.exists(target_file_path)) next
+        if (file.exists(target_file_path) & file.exists(model_file_path)) next
         computed_iterations <- computed_iterations + 1
         
         tryCatch({
@@ -292,6 +294,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
             end_week = end_week, region = region_name, radius = rad, estimation_granularity = estimation_granularity
           )
           create_coef_df(payload, target_file_path)
+          saveRDS(list(fitted_models = fitted_models, W = aligned_data$W), model_file_path)
           
         }, error = function(e) {
           # Log failure to console quietly, update failure counts, and write NA placeholders
