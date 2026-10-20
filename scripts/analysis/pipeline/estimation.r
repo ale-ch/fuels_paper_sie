@@ -294,7 +294,7 @@ run_rolling_estimation <- function(base_data_path, config, formula, radiuses, wi
             end_week = end_week, region = region_name, radius = rad, estimation_granularity = estimation_granularity
           )
           create_coef_df(payload, target_file_path)
-          saveRDS(list(fitted_models = fitted_models, W = aligned_data$W), model_file_path)
+          # saveRDS(list(fitted_models = fitted_models, W = aligned_data$W), model_file_path)
           
         }, error = function(e) {
           # Log failure to console quietly, update failure counts, and write NA placeholders
