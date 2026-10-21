@@ -4,8 +4,17 @@ library(sf)
 
 geo_data <- readRDS("/Volumes/T7 Shield/FRES/fuels_data/data/geo_data/geo_data.RDS")
 data_path <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/results_run_nuts3_42_20261016_214911.RDS"
-base_out_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation/maps"
+# base_out_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation/maps"
+base_out_dir <- "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation/maps2"
+
 res_df <- readRDS(data_path)
+bolzano_df <- res_df %>% 
+  filter(region == "Trento") %>% 
+  mutate(
+    region = "Bolzano/Bozen"
+  )
+
+res_df <- bind_rows(res_df, bolzano_df)
 
 tables_paths <- c(
   "/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation_tables/legend.txt",
@@ -20,6 +29,7 @@ tables[2:3] <- lapply(tables[2:3], function(x) {
 })
 
 avg_by_nuts3 <- tables[[3]]
+avg_by_nuts3$`Bolzano/Bozen` <- avg_by_nuts3$Trento
 
 avg_by_nuts3_long <- pivot_longer(
   avg_by_nuts3,
@@ -208,6 +218,24 @@ mult_by_nuts3 <- res_df %>%
   summarize(num_value = median(multiplier, na.rm = TRUE), .groups = "drop") %>%
   rename(nuts3 = region)
 
+top5_df <- mult_by_nuts3 %>% 
+  filter(
+    model == "SAR"
+  ) %>% 
+  arrange(desc(num_value)) %>% 
+  head(5)
+
+bottom5_df <- mult_by_nuts3 %>% 
+  filter(
+    model == "SAR"
+  ) %>% 
+  arrange(desc(num_value)) %>% 
+  tail(5)
+
+bind_rows(top5_df, bottom5_df) %>% write_csv("/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation_tables/topbot_spatial_multiplier.csv")
+
+
+
 # 3. Join with NUTS hierarchy
 geo_data_df <- geo_data %>% 
   st_drop_geometry() %>% 
@@ -334,6 +362,23 @@ asymmetry_by_nuts3 <- impacts_df %>%
   summarize(num_value = mean(asym_gap, na.rm = TRUE), .groups = "drop") %>%
   rename(nuts3 = region) %>%
   mutate(model = "SAR", term = "Asymmetry Gap")
+
+top5_df <- asymmetry_by_nuts3 %>% 
+  filter(
+    model == "SAR"
+  ) %>% 
+  arrange(desc(num_value)) %>% 
+  head(5)
+
+bottom5_df <- asymmetry_by_nuts3 %>% 
+  filter(
+    model == "SAR"
+  ) %>% 
+  arrange(desc(num_value)) %>% 
+  tail(5)
+
+bind_rows(top5_df, bottom5_df) %>% write_csv("/Volumes/T7 Shield/FRES/fuels_data/results/run_nuts3_42_05_STEP/presentation_tables/topbot_asymmetry.csv")
+
 
 # 3. Join with NUTS hierarchy
 geo_data_df <- geo_data %>% 
